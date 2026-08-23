@@ -43,8 +43,127 @@ A rebase, an amend or a fresh clone changes commit times, file modification
 times and blob identity. None of that may change a `Created` or `Updated`
 value, because those are recorded in the document itself.
 
-No Git operation is implemented at this stage. The Markdown repository layer
-reads and writes files; it does not stage, commit, pull or push.
+### 1.1 How tissues reaches Git
+
+tissues runs the installed `git` executable through `os/exec`, with arguments
+passed directly. There is no Git library, no GitHub API client, and no shell:
+no `sh -c`, no command strings. Every command is run with the caller's
+context, so cancellation reaches the git process.
+
+The Git wrapper is deliberately narrow. It verifies the repository, reports
+porcelain status, detects HEAD and upstream, fast-forwards, stages exact
+paths, commits, pushes, and reports ahead/behind. It is not a general-purpose
+Git library and nothing generic escapes through the service.
+
+Commit authorship is whatever Git identity the tissues process is configured
+with. Push credentials are the process's own. Neither authenticates the
+caller of a tissues operation.
+
+### 1.2 The clean-repository precondition
+
+Every mutation begins by requiring a clean working tree and a clean index:
+no modified tracked files, no staged changes, no untracked files. A dirty
+repository is refused before anything is pulled, written, staged or
+committed, so tissues can never sweep unrelated work into its commits.
+
+Reads do not require a clean tree. They only parse the current filesystem
+state and change nothing.
+
+### 1.3 Local mode
+
+```
+lock
+→ require a clean working tree and index
+→ load and validate the issue tree
+→ apply one semantic mutation
+→ write the exact canonical file(s)
+→ git add -- <exact paths>
+→ git commit
+```
+
+No pull, no push, no remote contact at all — even when a remote is
+configured.
+
+### 1.4 Remote-synchronized mode
+
+```
+lock
+→ require a clean working tree and index
+→ if HEAD exists and the branch has an upstream:
+      git pull --ff-only          (failure aborts before any mutation)
+→ load and validate the issue tree
+→ apply one semantic mutation
+→ write the exact canonical file(s)
+→ git add -- <exact paths>
+→ git commit
+→ if the branch has an upstream: git push
+  otherwise:                     git push --set-upstream origin HEAD
+```
+
+Staging always names exact paths. `git add .` is never used.
+
+`git pull --ff-only` is the only synchronization primitive. There is no
+separate fetch, no automatic merge, no rebase, no conflict retry and no
+force-push. Establishing an upstream creates only the current branch on the
+remote.
+
+On the bootstrap case — no HEAD, no upstream, an empty remote named `origin`
+— the pull is skipped, the first mutation produces the root commit, and
+`git push --set-upstream origin HEAD` creates the remote branch and records
+the upstream.
+
+If no upstream exists after the commit, the remote is `origin` by name. There
+is no remote discovery or ranking; if no usable `origin` exists, that is
+reported as an explicit error.
+
+### 1.5 Divergence is a hard stop
+
+If `git pull --ff-only` fails, the upstream has diverged and the mutation is
+abandoned at that point. What tissues guarantees is:
+
+- the requested tissues mutation does not run;
+- no canonical tissues file is written by the request;
+- the index is unchanged by the request;
+- local HEAD does not move;
+- the working tree is unchanged;
+- no tissues commit is created.
+
+`git pull` fetches before it integrates, so a failed fast-forward may still
+have updated remote-tracking refs such as `refs/remotes/origin/main`, and
+`FETCH_HEAD`. That is normal Git bookkeeping, not a tissues semantic
+mutation, and tissues neither suppresses nor undoes it. The repository is
+therefore not guaranteed byte-for-byte identical; canonical tissues state and
+the current branch are.
+
+Resolving divergence is human work with ordinary Git tools; v0 does not
+attempt it.
+
+### 1.6 A failed push does not undo a commit
+
+If the commit succeeds but the push fails, the commit stands. tissues does
+not reset, revert or discard the mutation. The operation returns the mutated
+object together with an explicit error stating that the change was committed
+locally but not pushed. The working tree stays clean and the branch is simply
+ahead of its upstream; a later mutation publishes the backlog once pushing
+works again. Success is never claimed for an unpublished change.
+
+### 1.7 An incomplete transaction
+
+Validation and synchronization failures all happen before anything is
+written. There remains one window that cannot be moved earlier: canonical
+files exist on disk but `git add` or `git commit` has not yet completed.
+
+A failure in that window is its own outcome, distinct from a refusal. The
+requested mutation changed canonical files in the working tree but was not
+recorded as a commit, so the intended commit does not exist and the mutation
+is not durable. The operation reports this explicitly and returns no domain
+object.
+
+The repository is left dirty or staged. The clean-repository precondition
+therefore refuses every further mutation — as an ordinary repository refusal,
+not as another incomplete transaction — until a human repairs the repository
+with ordinary Git commands. There is no automatic `reset --hard`, no revert
+and no hidden rollback machinery.
 
 ---
 
@@ -276,13 +395,119 @@ persistence.
 
 ## 3. Interface/application semantics
 
-Not implemented yet.
+One application service owns every issue and comment operation. REST, MCP and
+any UI will be thin adapters over it; there is no separate REST semantic and
+MCP semantic. **REST, MCP, HTML rendering and any browser interface are not
+implemented.**
 
-There is no service layer, no REST API, no MCP server and no HTML interface
-at this stage. When they arrive, REST and MCP will be thin adapters over one
-service layer, which will own issue and comment operations; there will not be
-separate REST semantics and MCP semantics.
+### 3.1 The service
 
-Timestamp and ID generation belong to that service layer: it will stamp
-`Created` and `Updated` via `model.Timestamp` and mint IDs via `store.NewID`,
-then hand complete objects to the store to persist.
+One process serves one repository, in one of two modes: local, or
+remote-synchronized (§1.3, §1.4).
+
+The service holds no loaded tree between calls. Every operation, read or
+write, loads and validates the issue tree fresh from the filesystem while
+holding a single mutex. Reads take the same mutex, so no read can observe a
+half-finished pull, write or commit, and a restarted process is
+indistinguishable from a running one.
+
+Because no tree is retained, a returned issue or comment is a snapshot.
+Mutating it afterwards changes nothing on disk; only another service call
+does.
+
+Every operation takes a `context.Context`, which is passed to every git
+command.
+
+### 3.2 Operations
+
+`ListIssues` returns the complete root hierarchy. There is no filtering.
+
+`GetIssue` looks up an issue by immutable ID and returns its child hierarchy
+and its comments in canonical order.
+
+`CreateIssue` takes an optional parent ID, a required title and an optional
+description. The service owns everything else: the ID, the open state, and
+both timestamps, with `Created == Updated` at creation.
+
+`UpdateIssue` changes only the title and the description; an omitted field is
+untouched. The ID, state, creation time, parent, children and comments cannot
+be updated.
+
+`CloseIssue` and `ReopenIssue` change only the state and `Updated`. Closing
+does not cascade to children.
+
+`AddComment` takes an issue ID, an author and a body. The service owns the
+ID and both timestamps, with `Created == Updated` at creation.
+
+`EditComment` changes only the body, preserving the comment's ID, author and
+creation time — so an edit can never move a comment, because ordering is
+`Created ASC, ID ASC` and never consults `Updated`.
+
+Only these eight operations exist. No generic filesystem or Git operation is
+reachable through the service.
+
+### 3.3 Identity and timestamp ownership
+
+The service mints IDs with `store.NewID` and stamps `Created` and `Updated`
+with `model.Timestamp`, then hands complete objects to the store. Callers
+never supply IDs, state, timestamps, or derived relationships.
+
+### 3.4 No-op operations do not commit
+
+An operation that changes nothing succeeds, writes nothing, commits nothing,
+and leaves `Updated` alone: an update whose fields already match, closing a
+closed issue, reopening an open one, editing a comment to its current body.
+
+One changed semantic operation produces exactly one commit, with a
+deterministic message:
+
+```
+create issue <id>: <title>
+update issue <id>
+close issue <id>
+reopen issue <id>
+comment <comment-id> on issue <issue-id>
+edit comment <comment-id> on issue <issue-id>
+```
+
+No trailers are added and no commit is ever amended.
+
+### 3.5 Outcome classes
+
+Every mutating operation ends in one of six outcomes. Each says something
+different about what happened to canonical state, which is what later
+adapters need in order to map it:
+
+| Outcome | Canonical state | Result object |
+|---|---|---|
+| success, including an idempotent no-op | mutated, or deliberately untouched | the object |
+| **not found** — unknown issue or comment ID | untouched | nil |
+| **invalid request** — ordinary validation failure, such as an empty title or an empty comment body | untouched | nil |
+| **repository unusable** — the repository prevented the mutation *before any file was written*: a dirty working tree, invalid tissues content, a Git inspection failure, or an upstream that will not fast-forward (§1.5) | untouched | nil |
+| **written but not committed** — canonical files were written but staging or committing did not complete (§1.7); repair is required | changed on disk, not committed | nil |
+| **committed locally but not pushed** — the mutation is committed and durable; only publication failed (§1.6) | mutated and committed | the object |
+
+Note what "repository unusable" does *not* cover: it is not a blanket class
+for every Git failure. A Git failure after canonical files are written is
+"written but not committed", and a Git failure after the commit exists is
+"committed locally but not pushed". Confusing the three would tell an adapter
+the wrong thing about whether the caller's change survived.
+
+The result-object rule follows from the table and holds for all six mutating
+operations: **a non-nil domain object is returned only when the mutation
+succeeded — including an idempotent no-op — or alongside "committed locally
+but not pushed", where it is committed and durable.** Every other outcome
+returns nil, so a caller can never mistake a transient in-memory object for
+canonical state. `ListIssues` and `GetIssue` return nil on any error.
+
+Errors wrap git's own output where it is useful.
+
+### 3.6 What the service is not
+
+There is no authentication and no authorization. A comment's `Author` is
+self-asserted domain provenance and grants nothing; there is no actor domain
+object, and issues carry no creator or editor field. Git host credentials
+authenticate the Git process only.
+
+There is no assignment, no queue, no workflow, no labels, no priorities, no
+search index and no database.

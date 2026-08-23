@@ -61,3 +61,15 @@ Do not commit or push unless the task explicitly asks for it.
   Markdown or the filesystem.
 - `internal/store` — canonical Markdown serialization, strict parsing,
   validation and filesystem layout.
+- `internal/gitcli` — a narrow wrapper around the `git` executable. Keep it
+  narrow: it exists only to support the service transaction.
+- `internal/service` — the one application service. Every issue and comment
+  operation lives here.
+
+Two rules in the service are load-bearing, not stylistic:
+
+- It never retains a `store.Tree` between calls. Every operation loads fresh
+  filesystem state under the mutex, which is what makes a restarted process
+  identical to a running one.
+- Every mutation requires a clean working tree and index, and stages exact
+  paths. `git add .` must never appear.
