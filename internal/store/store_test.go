@@ -69,6 +69,33 @@ func mustLoad(t *testing.T, root string) *Tree {
 	return tree
 }
 
+// Sub-second precision is canonical now, and it survives a write/reload.
+func TestSubSecondTimestampsRoundTripThroughTheStore(t *testing.T) {
+	root := t.TempDir()
+	created := ts("2026-08-23T13:00:00.000000001Z")
+	tree := mustLoad(t, root)
+
+	iss := newIssue(NewID(), "Precise", created)
+	if _, err := tree.CreateIssue("", iss); err != nil {
+		t.Fatalf("CreateIssue with a sub-second timestamp: %v", err)
+	}
+	c := newComment(NewID(), "a@example", ts("2026-08-23T13:00:00.5Z"), "Body.")
+	if _, err := tree.CreateComment(iss.ID, c); err != nil {
+		t.Fatalf("CreateComment with a sub-second timestamp: %v", err)
+	}
+
+	got, ok := mustLoad(t, root).Issue(iss.ID)
+	if !ok {
+		t.Fatal("issue not found")
+	}
+	if !got.Created.Equal(created) || got.Created.Nanosecond() != 1 {
+		t.Errorf("Created = %v (%d ns), want %v", got.Created, got.Created.Nanosecond(), created)
+	}
+	if len(got.Comments) != 1 || got.Comments[0].Created.Nanosecond() != 500000000 {
+		t.Errorf("comment Created = %v", got.Comments[0].Created)
+	}
+}
+
 func TestLoadEmptyRepository(t *testing.T) {
 	tree := mustLoad(t, t.TempDir())
 	if len(tree.Roots()) != 0 {
@@ -442,11 +469,6 @@ func TestCreateRejectsInvalidInput(t *testing.T) {
 		"non-utc timestamp": func(tree *Tree) error {
 			iss := newIssue(NewID(), "Zoned", created)
 			iss.Created = created.In(time.FixedZone("CEST", 2*60*60))
-			_, err := tree.CreateIssue("", iss)
-			return err
-		},
-		"subsecond timestamp": func(tree *Tree) error {
-			iss := newIssue(NewID(), "Precise", created.Add(500*time.Millisecond))
 			_, err := tree.CreateIssue("", iss)
 			return err
 		},

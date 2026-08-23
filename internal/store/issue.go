@@ -147,18 +147,20 @@ func metaTime(line string, n int, key string) (time.Time, error) {
 	return t, nil
 }
 
-func formatTime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+func formatTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
-// parseTime accepts only RFC3339 UTC at second precision, i.e. exactly what
-// formatTime produces. Offsets and sub-second precision are rejected.
+// parseTime accepts only canonical RFC3339Nano in UTC, i.e. exactly what
+// formatTime produces. Whole seconds carry no fractional part at all, and
+// fractional seconds carry no trailing zeros, so every instant has exactly
+// one canonical spelling. Offsets other than Z are rejected.
 func parseTime(s string) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("malformed timestamp %q", s)
 	}
 	t = t.UTC()
-	if t.Format(time.RFC3339) != s {
-		return time.Time{}, fmt.Errorf("timestamp %q is not RFC3339 UTC at second precision", s)
+	if t.Format(time.RFC3339Nano) != s {
+		return time.Time{}, fmt.Errorf("timestamp %q is not canonical RFC3339 UTC", s)
 	}
 	return t, nil
 }

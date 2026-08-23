@@ -65,6 +65,11 @@ Do not commit or push unless the task explicitly asks for it.
   narrow: it exists only to support the service transaction.
 - `internal/service` — the one application service. Every issue and comment
   operation lives here.
+- `internal/rest` — the HTTP transport adapter. REST is a transport adapter;
+  issue and comment semantics stay in `internal/service`. Transport JSON
+  shapes live here so `internal/model` carries no JSON tags.
+- `cmd/tissues` — the `tissues serve` executable. Flags only; it adds no Git
+  or domain behaviour of its own.
 
 Two rules in the service are load-bearing, not stylistic:
 
@@ -73,3 +78,5 @@ Two rules in the service are load-bearing, not stylistic:
   identical to a running one.
 - Every mutation requires a clean working tree and index, and stages exact
   paths. `git add .` must never appear.
+- The HTTP listener defaults to loopback. v0 has no authentication and the
+  process may hold Git push credentials, so do not change that default.

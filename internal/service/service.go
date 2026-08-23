@@ -239,13 +239,18 @@ func (s *Service) setState(ctx context.Context, id string, state model.State, ms
 // AddComment appends a comment to an issue. Author is self-asserted domain
 // provenance: it records who a comment claims to be from and authenticates
 // nothing.
+//
+// The new comment's Created is always strictly later than that of every
+// comment already on the issue, so comments preserve the order the service
+// was called in. See nextCommentTime.
 func (s *Service) AddComment(ctx context.Context, issueID, author, body string) (*model.Comment, error) {
 	var added *model.Comment
 	err := s.mutate(ctx, func(t *store.Tree) ([]string, string, error) {
-		if _, ok := t.Issue(issueID); !ok {
+		iss, ok := t.Issue(issueID)
+		if !ok {
 			return nil, "", fmt.Errorf("issue %q: %w", issueID, ErrNotFound)
 		}
-		now := model.Timestamp(s.now())
+		now := s.nextCommentTime(iss)
 		c := &model.Comment{ID: store.NewID(), Author: author, Created: now, Updated: now, Body: body}
 		if err := c.Validate(); err != nil {
 			return nil, "", fmt.Errorf("%w: %v", ErrValidation, err)
@@ -416,6 +421,25 @@ func (s *Service) push(ctx context.Context) error {
 		return notPushed(err)
 	}
 	return nil
+}
+
+// nextCommentTime returns the Created timestamp for a new comment on iss:
+// the wall clock, unless that is not strictly later than the newest comment
+// already there, in which case it advances by one nanosecond.
+//
+// Comments are the conversation, and Created is what orders it, so two
+// comments submitted inside one clock tick must still be distinguishable.
+// This also survives a clock that stands still or steps slightly backwards.
+// It needs no state: the issue's own comments, already in canonical order,
+// carry everything the decision depends on.
+func (s *Service) nextCommentTime(iss *model.Issue) time.Time {
+	now := model.Timestamp(s.now())
+	if n := len(iss.Comments); n > 0 {
+		if latest := iss.Comments[n-1].Created; !now.After(latest) {
+			return latest.Add(time.Nanosecond)
+		}
+	}
+	return now
 }
 
 func notPushed(err error) error { return fmt.Errorf("%w: %v", ErrNotPushed, err) }

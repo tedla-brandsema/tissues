@@ -253,14 +253,28 @@ decoration, and the path was never identity in the first place.
 
 ### 2.5 Domain timestamps
 
-`Created` and `Updated` are recorded in the document as RFC3339 UTC at whole-
-second precision, for example `2026-08-23T13:20:11Z`. Offsets other than `Z`
-and sub-second precision are rejected on both write and read.
+`Created` and `Updated` are recorded in the document as canonical RFC3339Nano
+in UTC. All of these are valid:
+
+```
+2026-08-23T15:21:33Z
+2026-08-23T15:21:33.1Z
+2026-08-23T15:21:33.123456789Z
+```
+
+Canonical means there is exactly one spelling per instant: a whole second
+carries no fractional part at all, and a fractional part carries no trailing
+zeros. `…:33.0Z` and `…:33.500Z` are therefore rejected, as is any offset
+other than `Z`. Precision below a nanosecond does not exist.
 
 They are domain facts. They are never inferred from file modification time,
 Git commit time, a filename, or an ID.
 
 `Created` is immutable. `Updated` must not be earlier than `Created`.
+
+**`Created` is the domain event timestamp used for comment chronology.** That
+is why the representation carries sub-second precision: two comments written
+inside the same second must still be distinguishable (§2.6).
 
 ### 2.6 Comment ordering
 
@@ -268,9 +282,17 @@ Comments are presented in `Created` ascending order, tie-broken by `ID`
 ascending. Because IDs are unique, this is a total order and is therefore
 deterministic across processes and machines.
 
-`Updated` is never consulted for ordering. Editing a comment consequently
-cannot change its conversational position, no matter how much later the edit
-happens.
+`Updated` is never consulted for ordering. **Editing a comment never changes
+its conversational position**, no matter how much later the edit happens.
+
+The ID tie-break exists for canonical comments that arrive from outside
+tissues — imported or hand-written — and happen to carry an identical
+`Created`. Comments that tissues creates itself do not tie, because of the
+rule in §3.2: when adding a comment, tissues assigns a `Created` timestamp
+strictly later than the latest existing comment on that issue. If the
+wall-clock candidate is not later, tissues advances it by one nanosecond.
+That is what preserves conversational order for normal tissues writes, even
+when two comments are submitted inside one clock tick.
 
 Child issues are returned in directory-name order, which is lexical by ID and
 likewise deterministic.
@@ -285,7 +307,7 @@ error, and a failing document fails the whole load:
 - an empty or multi-line issue title;
 - an empty comment author or an empty comment body;
 - a malformed ID, or an ID that disagrees with its directory or filename;
-- a timestamp that is not RFC3339 UTC at second precision;
+- a timestamp that is not canonical RFC3339Nano in UTC;
 - `Updated` earlier than `Created`;
 - a duplicate ID anywhere in the tree;
 - a directory inside `issues/` whose name does not begin with a valid ID.
@@ -395,10 +417,10 @@ persistence.
 
 ## 3. Interface/application semantics
 
-One application service owns every issue and comment operation. REST, MCP and
-any UI will be thin adapters over it; there is no separate REST semantic and
-MCP semantic. **REST, MCP, HTML rendering and any browser interface are not
-implemented.**
+One application service owns every issue and comment operation. Adapters over
+it are thin transports that own no domain semantics of their own. A REST API
+and the `tissues serve` command are implemented (§4). **MCP, HTML rendering
+and any browser interface are not implemented.**
 
 ### 3.1 The service
 
@@ -438,6 +460,15 @@ does not cascade to children.
 
 `AddComment` takes an issue ID, an author and a body. The service owns the
 ID and both timestamps, with `Created == Updated` at creation.
+
+`Created` is the wall clock, except that it is always strictly later than the
+`Created` of every comment already on that issue: if the wall-clock candidate
+is not later than the latest existing comment, tissues advances it by one
+nanosecond. Comments created through the service therefore preserve the order
+the service was called in, even when several arrive within one clock tick, and
+even if the clock stands still or steps backwards. This needs no stored
+sequence, counter or index — the issue's own comments, already in canonical
+order, carry everything the decision depends on.
 
 `EditComment` changes only the body, preserving the comment's ID, author and
 creation time — so an edit can never move a comment, because ordering is
@@ -511,3 +542,178 @@ authenticate the Git process only.
 
 There is no assignment, no queue, no workflow, no labels, no priorities, no
 search index and no database.
+
+---
+
+## 4. HTTP interface
+
+`internal/rest` is a transport adapter over the service. It decodes requests,
+encodes responses and maps outcome classes to status codes. It holds no issue
+or comment semantics, and it reaches the domain only through the eight
+service operations.
+
+Every request's `context.Context` is passed straight into the service
+operation, and from there into every git command.
+
+### 4.1 Routes
+
+```
+GET    /api/issues                                list the complete hierarchy
+POST   /api/issues                                create an issue
+GET    /api/issues/{id}                           one issue, with children and comments
+PUT    /api/issues/{id}                           update title and/or description
+POST   /api/issues/{id}/close                     close
+POST   /api/issues/{id}/reopen                    reopen
+POST   /api/issues/{id}/comments                  add a comment
+PUT    /api/issues/{id}/comments/{commentID}      edit a comment's body
+```
+
+That is the whole surface. There is no filtering, pagination, search, delete,
+move, or assignment route.
+
+### 4.2 Representations
+
+Transport shapes live in `internal/rest`; `internal/model` carries no JSON
+tags, because the domain does not know it is served over HTTP. Names are
+snake_case and timestamps are RFC3339 strings, carrying whatever sub-second
+precision the domain timestamp has (§2.5).
+
+An issue:
+
+```json
+{
+  "id": "…", "title": "…", "state": "open",
+  "created": "2026-08-23T13:20:11Z", "updated": "2026-08-23T14:02:44Z",
+  "description": "…", "parent_id": "",
+  "children": [], "comments": []
+}
+```
+
+`children` and `comments` are always arrays, never `null`, at every level of
+the hierarchy. `parent_id` is the empty string for a root issue. No
+filesystem path and no Git metadata appears in a response.
+
+A comment:
+
+```json
+{
+  "id": "…", "author": "…",
+  "created": "2026-08-23T13:41:02Z", "updated": "2026-08-23T13:41:02Z",
+  "body": "…"
+}
+```
+
+`GET /api/issues` wraps the roots: `{"issues": [ … ]}`.
+
+Request bodies carry only what the caller may set. Creating an issue takes
+`parent_id`, `title` and `description`; updating one takes `title` and
+`description`, where an omitted field is left untouched (§3.2). Adding a
+comment takes `author` and `body`; editing one takes `body` alone — the
+transport offers no way to change a comment's ID, author, or either
+timestamp.
+
+`author` is provenance only. HTTP does not authenticate it (§4.6).
+
+### 4.3 Request decoding
+
+A request body must be exactly one JSON object. Malformed JSON, an unknown
+field, and a trailing second JSON value are each rejected with
+`400 invalid_request`. So is any body that is not a JSON object: a string, a
+number, a boolean, an array, or `null` — which matters because Go's JSON
+decoder would otherwise accept `null` for a struct and leave it zero-valued,
+making an update request look like one with every field omitted. An empty
+object `{}` is a JSON object and goes through as an ordinary request, which
+for an update means every field omitted and therefore a no-op.
+
+There is no schema system and no negotiation.
+
+### 4.4 Status and error mapping
+
+Errors are always JSON, never plain text:
+
+```json
+{"code": "invalid_request", "error": "a useful message"}
+```
+
+The outcome classes of §3.5 map one-to-one onto status codes:
+
+| Outcome | Status | `code` | `result` |
+|---|---|---|---|
+| success — create | 201 | — | the object |
+| success — read, update, close, reopen, edit | 200 | — | the object |
+| not found | 404 | `not_found` | absent |
+| invalid request | 400 | `invalid_request` | absent |
+| repository unusable | 409 | `repository_unusable` | absent |
+| written but not committed | 500 | `incomplete` | absent |
+| committed locally but not pushed | 502 | `not_pushed` | **the committed object** |
+| anything unclassified | 500 | `internal` | absent |
+
+Those six codes are the complete public set.
+
+Routing failures use the same envelope and the same codes. An unsupported
+method on a real API path is `405` with `invalid_request` and an `Allow`
+header; an unknown path below `/api/` is `404` with `not_found`. No API
+response is ever plain text. (The non-API root `/` is not an API path and is
+not covered by this.)
+
+`409 repository_unusable` covers a dirty working tree, invalid tissues
+content, and an upstream that will not fast-forward. Nothing was mutated.
+
+`500 incomplete` states in its message that canonical files may have been
+written to the working tree but the intended Git commit was not completed,
+and that the repository needs manual repair before further changes.
+
+### 4.5 `502 not_pushed` carries the result
+
+This is the one response that returns both an error and a domain object,
+because the service does: the mutation is committed in the local Git
+repository and only publication failed.
+
+```json
+{
+  "code": "not_pushed",
+  "error": "… including git's own detail …",
+  "result": { "id": "…", "title": "…", … }
+}
+```
+
+**A client must not blindly retry a non-idempotent create merely because the
+status is not 2xx.** Inspect `code`: on `not_pushed` the issue or comment
+already exists locally, and retrying would create a duplicate. The `result`
+object is the created or updated one. A later successful mutation publishes
+the accumulated local commits.
+
+### 4.6 No authentication
+
+v0 has no authentication, no authorization, no sessions, no cookies and no
+CORS. Anyone who can reach the port can create, edit and close issues, and
+can cause the process to push to its Git remote with the credentials that
+process holds. The default listener is therefore loopback-only, and exposing
+the server to an untrusted network is unsupported and unsafe.
+
+### 4.7 `tissues serve`
+
+```
+tissues serve [-repo .] [-addr 127.0.0.1:8080] [-remote-sync=true]
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-repo` | `.` | Git repository holding the tissues data |
+| `-addr` | `127.0.0.1:8080` | Listen address; the loopback default is load-bearing (§4.6) |
+| `-remote-sync` | `true` | Select the remote-synchronized mode (§1.4) rather than local mode (§1.3) |
+
+`-remote-sync` selects between the two existing service modes. The command
+introduces no third Git behaviour.
+
+At startup the command constructs the service, which verifies the directory
+is a Git working tree, and then reads and validates the entire issue tree
+once before listening. A repository that is not valid Git, or that holds
+invalid tissues content, fails at startup rather than on the first request. A
+repository with no `issues/` directory is valid and starts normally.
+
+tissues never initializes a repository, creates one, or configures a remote.
+Those stay ordinary Git responsibilities.
+
+`tissues` with no command, or with an unknown command, prints usage and exits
+non-zero. `SIGINT` and `SIGTERM` shut the server down gracefully.

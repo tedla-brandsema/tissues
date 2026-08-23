@@ -22,10 +22,14 @@ const (
 
 func (s State) Valid() bool { return s == StateOpen || s == StateClosed }
 
-// Timestamp normalizes t to the domain timestamp precision: UTC, whole
-// seconds. Domain timestamps are facts recorded by tissues; they are never
-// derived from file modification times, commit times, filenames or IDs.
-func Timestamp(t time.Time) time.Time { return t.UTC().Truncate(time.Second) }
+// Timestamp normalizes t to the domain timestamp representation: UTC, with
+// whatever nanosecond precision t carries. Domain timestamps are facts
+// recorded by tissues; they are never derived from file modification times,
+// commit times, filenames or IDs.
+//
+// The precision matters: Created is what orders a conversation, so two
+// comments written in the same second must still be distinguishable.
+func Timestamp(t time.Time) time.Time { return t.UTC() }
 
 // Issue is a single tissues issue.
 //
@@ -109,8 +113,8 @@ func validTimes(what string, created, updated time.Time) error {
 		if ts.t.IsZero() {
 			return fmt.Errorf("%s: zero %s timestamp", what, ts.name)
 		}
-		if ts.t.Location() != time.UTC || !ts.t.Equal(ts.t.Truncate(time.Second)) {
-			return fmt.Errorf("%s: %s timestamp must be UTC at second precision", what, ts.name)
+		if ts.t.Location() != time.UTC {
+			return fmt.Errorf("%s: %s timestamp must be UTC", what, ts.name)
 		}
 	}
 	if updated.Before(created) {

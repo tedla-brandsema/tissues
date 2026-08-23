@@ -1347,3 +1347,138 @@ func TestNotPushedReturnsTheCommittedObject(t *testing.T) {
 		t.Errorf("the committed issue is not readable: %v", err)
 	}
 }
+
+// --- comment chronology -----------------------------------------------------
+
+// Created is what orders a conversation, so comments must come back in the
+// order the service was called in even when the clock does not move at all.
+// A frozen clock is the strongest version of the rapid-submission case: with
+// whole-second timestamps every comment here would tie on Created and fall
+// through to the random-ID tie-break.
+func TestCommentsCreatedAtTheSameInstantKeepSubmissionOrder(t *testing.T) {
+	ctx := context.Background()
+	dir := initRepo(t)
+	s, c := newService(t, dir, false)
+	iss := mustCreate(t, s, "Rapid conversation")
+
+	frozen := c.t // never advanced again
+	var added []*model.Comment
+	for _, body := range []string{"First.", "Second.", "Third.", "Fourth."} {
+		got, err := s.AddComment(ctx, iss.ID, "a@example", body)
+		if err != nil {
+			t.Fatalf("AddComment(%q): %v", body, err)
+		}
+		added = append(added, got)
+	}
+	if !c.t.Equal(frozen) {
+		t.Fatal("fixture is wrong: the clock must not have advanced")
+	}
+
+	// Strictly increasing Created, despite one single wall-clock instant.
+	for i := 1; i < len(added); i++ {
+		if !added[i].Created.After(added[i-1].Created) {
+			t.Errorf("comment %d Created %v is not after comment %d Created %v",
+				i, added[i].Created, i-1, added[i-1].Created)
+		}
+	}
+	if !added[0].Created.Equal(model.Timestamp(frozen)) {
+		t.Errorf("first comment Created = %v, want the clock instant %v", added[0].Created, model.Timestamp(frozen))
+	}
+	// Created == Updated at creation still holds.
+	for i, got := range added {
+		if !got.Updated.Equal(got.Created) {
+			t.Errorf("comment %d: Updated %v != Created %v", i, got.Updated, got.Created)
+		}
+	}
+
+	want := []string{added[0].ID, added[1].ID, added[2].ID, added[3].ID}
+	assertOrder := func(what string, svc *Service) {
+		t.Helper()
+		got, err := svc.GetIssue(ctx, iss.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ids := commentIDs(got); !equalStrings(ids, want) {
+			t.Errorf("%s: comment order = %v, want submission order %v", what, ids, want)
+		}
+	}
+	assertOrder("in place", s)
+
+	fresh, _ := newService(t, dir, false)
+	assertOrder("after reload", fresh)
+
+	// Editing the earliest comment much later must not move it.
+	c.advance(24 * time.Hour)
+	if _, err := s.EditComment(ctx, iss.ID, added[0].ID, "First, edited a day later."); err != nil {
+		t.Fatal(err)
+	}
+	assertOrder("after editing the first comment", s)
+	again, _ := newService(t, dir, false)
+	assertOrder("after editing and reloading", again)
+}
+
+// The nanosecond bump only applies when the clock has not moved on; a normal
+// advancing clock is used as-is.
+func TestAddCommentUsesTheClockWhenItAdvances(t *testing.T) {
+	ctx := context.Background()
+	dir := initRepo(t)
+	s, c := newService(t, dir, false)
+	iss := mustCreate(t, s, "Slow conversation")
+
+	c.advance(time.Minute)
+	first, err := s.AddComment(ctx, iss.ID, "a@example", "First.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Created.Equal(model.Timestamp(c.t)) {
+		t.Errorf("Created = %v, want the clock %v", first.Created, model.Timestamp(c.t))
+	}
+
+	c.advance(time.Minute)
+	second, err := s.AddComment(ctx, iss.ID, "a@example", "Second.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Created.Equal(model.Timestamp(c.t)) {
+		t.Errorf("Created = %v, want the clock %v", second.Created, model.Timestamp(c.t))
+	}
+
+	// A clock that steps backwards must still not break the ordering.
+	c.t = c.t.Add(-time.Hour)
+	third, err := s.AddComment(ctx, iss.ID, "a@example", "Third.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !third.Created.After(second.Created) {
+		t.Errorf("Created = %v, want strictly after %v despite the clock going backwards",
+			third.Created, second.Created)
+	}
+	fresh, _ := newService(t, dir, false)
+	got, err := fresh.GetIssue(ctx, iss.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := commentIDs(got); !equalStrings(ids, []string{first.ID, second.ID, third.ID}) {
+		t.Errorf("order = %v, want submission order", ids)
+	}
+}
+
+func commentIDs(i *model.Issue) []string {
+	ids := make([]string, len(i.Comments))
+	for n, c := range i.Comments {
+		ids[n] = c.ID
+	}
+	return ids
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

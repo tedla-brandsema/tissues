@@ -10,8 +10,11 @@ import (
 func TestTimestamp(t *testing.T) {
 	in := time.Date(2026, 8, 23, 15, 20, 11, 987654321, time.FixedZone("CEST", 2*60*60))
 	got := Timestamp(in)
-	if want := "2026-08-23T13:20:11Z"; got.Format(time.RFC3339) != want {
+	if want := "2026-08-23T13:20:11.987654321Z"; got.Format(time.RFC3339Nano) != want {
 		t.Errorf("Timestamp(%v) = %v, want %s", in, got, want)
+	}
+	if got.Nanosecond() != 987654321 {
+		t.Errorf("Timestamp discarded sub-second precision: %d ns", got.Nanosecond())
 	}
 	if got.Location() != time.UTC {
 		t.Errorf("Timestamp location = %v, want UTC", got.Location())
@@ -22,11 +25,18 @@ func TestTimestamp(t *testing.T) {
 
 	c := &Comment{ID: "x", Author: "a@b", Created: got, Updated: got, Body: "body"}
 	if err := c.Validate(); err != nil {
-		t.Errorf("normalized timestamps rejected: %v", err)
+		t.Errorf("normalized sub-second timestamps rejected: %v", err)
 	}
+	// Whole seconds remain perfectly valid.
+	whole := Timestamp(time.Date(2026, 8, 23, 13, 20, 11, 0, time.UTC))
+	c.Created, c.Updated = whole, whole
+	if err := c.Validate(); err != nil {
+		t.Errorf("whole-second timestamps rejected: %v", err)
+	}
+	// A non-UTC location is still refused.
 	c.Created, c.Updated = in, in
 	if err := c.Validate(); err == nil {
-		t.Error("Validate accepted a non-UTC, sub-second timestamp")
+		t.Error("Validate accepted a non-UTC timestamp")
 	}
 }
 
