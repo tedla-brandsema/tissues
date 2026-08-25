@@ -202,6 +202,56 @@ func (s *Service) UpdateIssue(ctx context.Context, req UpdateIssueRequest) (*mod
 	return issueResult(updated, err)
 }
 
+// MoveIssue changes an issue's optional parent while preserving the complete
+// issue subtree. An empty parentID detaches the issue. Moving to the current
+// parent is an idempotent no-op.
+func (s *Service) MoveIssue(ctx context.Context, id, parentID string) (*model.Issue, error) {
+	var moved *model.Issue
+	err := s.mutate(ctx, func(t *store.Tree) ([]string, string, error) {
+		iss, ok := t.Issue(id)
+		if !ok {
+			return nil, "", fmt.Errorf("issue %q: %w", id, ErrNotFound)
+		}
+		moved = iss
+		if parentID == id {
+			return nil, "", fmt.Errorf("%w: issue %q cannot be its own parent", ErrValidation, id)
+		}
+		if parentID != "" {
+			parent, ok := t.Issue(parentID)
+			if !ok {
+				return nil, "", fmt.Errorf("parent issue %q: %w", parentID, ErrNotFound)
+			}
+			if containsIssue(iss.Children, parent.ID) {
+				return nil, "", fmt.Errorf("%w: issue %q cannot be moved beneath its descendant %q", ErrValidation, id, parentID)
+			}
+		}
+		if iss.ParentID == parentID {
+			return nil, "", nil
+		}
+
+		iss.Updated = model.Timestamp(s.now())
+		oldDir, newDir, err := t.MoveIssue(id, parentID)
+		if err != nil {
+			return nil, "", writeFailed(err)
+		}
+		message := "detach issue " + id
+		if parentID != "" {
+			message = fmt.Sprintf("move issue %s under %s", id, parentID)
+		}
+		return []string{oldDir, newDir}, message, nil
+	})
+	return issueResult(moved, err)
+}
+
+func containsIssue(issues []*model.Issue, id string) bool {
+	for _, iss := range issues {
+		if iss.ID == id || containsIssue(iss.Children, id) {
+			return true
+		}
+	}
+	return false
+}
+
 // CloseIssue closes an open issue. Closing an already-closed issue succeeds
 // without writing or committing, and never cascades to children.
 func (s *Service) CloseIssue(ctx context.Context, id string) (*model.Issue, error) {

@@ -33,6 +33,8 @@ not in an adapter.
   abstractions whose only justification is "we may need this later".
 - Do not expand v0 scope speculatively. The only domain objects are Issue and
   Comment. If a task seems to need more, stop and say so instead.
+- Every issue is the same type. Its optional attachment to another issue is
+  mutable; containment is a relationship, not an Epic/Story/Task taxonomy.
 - Canonical issue data is Markdown on disk. The filesystem is the state;
   there is no cache and no index.
 - Use the standard library where practical. Third-party dependencies are
@@ -68,7 +70,7 @@ Do not commit or push unless the task explicitly asks for it.
 - `internal/rest` — the HTTP transport adapter. REST is a transport adapter;
   issue and comment semantics stay in `internal/service`. Transport JSON
   shapes live here so `internal/model` carries no JSON tags.
-- `internal/mcpserver` — the MCP transport adapter. Its eight tools map
+- `internal/mcpserver` — the MCP transport adapter. Its nine tools map
   directly to service operations; MCP representations and schema concerns
   stay here, and domain semantics stay in `internal/service`.
 - `internal/webui` — the server-rendered browser adapter. Templates, safe
@@ -83,6 +85,8 @@ Two rules in the service are load-bearing, not stylistic:
   identical to a running one.
 - Every mutation requires a clean working tree and index, and stages exact
   paths. `git add .` must never appear.
+- Moving an issue must preserve its complete subtree and directory basename,
+  reject cycles, and stage both the old and new directory paths exactly.
 - REST, MCP and the web UI in one served repository must share the same
   `*service.Service`; never construct per-adapter services with separate mutexes.
 - Only output from Goldmark's default safe renderer may become `template.HTML`;

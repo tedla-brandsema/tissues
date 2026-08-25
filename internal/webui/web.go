@@ -20,41 +20,56 @@ import (
 	"github.com/yuin/goldmark"
 )
 
-//go:embed templates/*.html static/style.css
+//go:embed templates/*.html static/style.css static/app.js static/favicon.svg
 var files embed.FS
 
-const contentSecurityPolicy = "default-src 'self'; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+const contentSecurityPolicy = "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 
 type handler struct {
 	svc       *service.Service
 	templates *template.Template
 	markdown  goldmark.Markdown
 	css       []byte
+	js        []byte
+	favicon   []byte
 }
 
-type indexPage struct {
-	Title  string
-	Issues []treeIssue
+type workspacePage struct {
+	Title         string
+	Filter        string
+	Navigation    []navIssue
+	Selected      *issueView
+	Parent        *issueChoice
+	MoveChoices   []issueChoice
+	AttachChoices []issueChoice
 }
 
-type treeIssue struct {
+type navIssue struct {
 	ID       string
 	Title    string
 	State    model.State
-	Children []treeIssue
+	Filter   string
+	Selected bool
+	Expanded bool
+	Children []navIssue
 }
 
-type issuePage struct {
+type issueView struct {
 	Title       string
 	ID          string
 	State       model.State
 	Created     string
 	Updated     string
-	ParentID    string
 	Description template.HTML
 	Source      string
-	Children    []treeIssue
+	Children    []issueChoice
 	Comments    []commentView
+}
+
+type issueChoice struct {
+	ID    string
+	Title string
+	State model.State
 }
 
 type commentView struct {
@@ -79,14 +94,19 @@ type errorPage struct {
 func New(s *service.Service) http.Handler {
 	t := template.Must(template.ParseFS(files, "templates/*.html"))
 	css := mustRead("static/style.css")
-	h := &handler{svc: s, templates: t, markdown: goldmark.New(), css: css}
+	js := mustRead("static/app.js")
+	favicon := mustRead("static/favicon.svg")
+	h := &handler{svc: s, templates: t, markdown: goldmark.New(), css: css, js: js, favicon: favicon}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", h.index)
 	mux.HandleFunc("GET /assets/style.css", h.stylesheet)
+	mux.HandleFunc("GET /assets/app.js", h.script)
+	mux.HandleFunc("GET /assets/favicon.svg", h.faviconImage)
 	mux.HandleFunc("GET /issues/{id}", h.issue)
 	mux.HandleFunc("POST /issues", h.createIssue)
 	mux.HandleFunc("POST /issues/{id}/update", h.updateIssue)
+	mux.HandleFunc("POST /issues/{id}/move", h.moveIssue)
 	mux.HandleFunc("POST /issues/{id}/close", h.closeIssue)
 	mux.HandleFunc("POST /issues/{id}/reopen", h.reopenIssue)
 	mux.HandleFunc("POST /issues/{id}/comments", h.addComment)
@@ -144,61 +164,142 @@ func sameLoopbackOrigin(r *http.Request) bool {
 }
 
 func (h *handler) index(w http.ResponseWriter, r *http.Request) {
-	issues, err := h.svc.ListIssues(r.Context())
+	page, err := h.workspace(r.Context(), "", r.URL.Query().Get("state"))
 	if err != nil {
 		h.writeServiceError(w, err, "")
 		return
 	}
-	page := indexPage{Title: "tissues", Issues: make([]treeIssue, 0, len(issues))}
-	for _, issue := range issues {
-		page.Issues = append(page.Issues, toTreeIssue(issue))
-	}
 	h.render(w, http.StatusOK, "index.html", page)
 }
 
-func toTreeIssue(issue *model.Issue) treeIssue {
-	v := treeIssue{ID: issue.ID, Title: issue.Title, State: issue.State, Children: make([]treeIssue, 0, len(issue.Children))}
-	for _, child := range issue.Children {
-		v.Children = append(v.Children, toTreeIssue(child))
-	}
-	return v
-}
-
 func (h *handler) issue(w http.ResponseWriter, r *http.Request) {
-	issue, err := h.svc.GetIssue(r.Context(), r.PathValue("id"))
+	id := r.PathValue("id")
+	page, err := h.workspace(r.Context(), id, r.URL.Query().Get("state"))
 	if err != nil {
-		h.writeServiceError(w, err, r.PathValue("id"))
-		return
-	}
-	page, err := h.toIssuePage(issue)
-	if err != nil {
-		h.writeServiceError(w, err, issue.ID)
+		h.writeServiceError(w, err, id)
 		return
 	}
 	h.render(w, http.StatusOK, "issue.html", page)
 }
 
-func (h *handler) toIssuePage(issue *model.Issue) (issuePage, error) {
+func (h *handler) workspace(ctx context.Context, selectedID, filter string) (workspacePage, error) {
+	if filter != "closed" && filter != "all" {
+		filter = "open"
+	}
+	roots, err := h.svc.ListIssues(ctx)
+	if err != nil {
+		return workspacePage{}, err
+	}
+	all := make(map[string]*model.Issue)
+	flattenIssues(roots, all)
+	var selected *model.Issue
+	if selectedID != "" {
+		selected = all[selectedID]
+		if selected == nil {
+			return workspacePage{}, fmt.Errorf("issue %q: %w", selectedID, service.ErrNotFound)
+		}
+	}
+	contextIDs := make(map[string]bool)
+	for issue := selected; issue != nil; issue = all[issue.ParentID] {
+		contextIDs[issue.ID] = true
+	}
+	page := workspacePage{Title: "Issues", Filter: filter}
+	for _, root := range roots {
+		if item, ok := toNavIssue(root, selectedID, filter, contextIDs); ok {
+			page.Navigation = append(page.Navigation, item)
+		}
+	}
+	if selected == nil {
+		return page, nil
+	}
+	view, err := h.toIssueView(selected)
+	if err != nil {
+		return workspacePage{}, err
+	}
+	page.Title = selected.Title
+	page.Selected = &view
+	if selected.ParentID != "" {
+		parent := all[selected.ParentID]
+		choice := issueChoice{ID: parent.ID, Title: parent.Title, State: parent.State}
+		page.Parent = &choice
+	}
+	descendants := make(map[string]bool)
+	flattenIssueIDs(selected.Children, descendants)
+	ancestors := make(map[string]bool)
+	for parent := all[selected.ParentID]; parent != nil; parent = all[parent.ParentID] {
+		ancestors[parent.ID] = true
+	}
+	for _, issue := range orderedIssues(roots) {
+		choice := issueChoice{ID: issue.ID, Title: issue.Title, State: issue.State}
+		if issue.ID != selected.ID && !descendants[issue.ID] {
+			page.MoveChoices = append(page.MoveChoices, choice)
+		}
+		if issue.ID != selected.ID && !descendants[issue.ID] && !ancestors[issue.ID] {
+			page.AttachChoices = append(page.AttachChoices, choice)
+		}
+	}
+	return page, nil
+}
+
+func flattenIssues(issues []*model.Issue, out map[string]*model.Issue) {
+	for _, issue := range issues {
+		out[issue.ID] = issue
+		flattenIssues(issue.Children, out)
+	}
+}
+
+func flattenIssueIDs(issues []*model.Issue, out map[string]bool) {
+	for _, issue := range issues {
+		out[issue.ID] = true
+		flattenIssueIDs(issue.Children, out)
+	}
+}
+
+func orderedIssues(issues []*model.Issue) []*model.Issue {
+	var out []*model.Issue
+	for _, issue := range issues {
+		out = append(out, issue)
+		out = append(out, orderedIssues(issue.Children)...)
+	}
+	return out
+}
+
+func toNavIssue(issue *model.Issue, selectedID, filter string, contextIDs map[string]bool) (navIssue, bool) {
+	v := navIssue{ID: issue.ID, Title: issue.Title, State: issue.State, Filter: filter, Selected: issue.ID == selectedID}
+	for _, child := range issue.Children {
+		if item, ok := toNavIssue(child, selectedID, filter, contextIDs); ok {
+			v.Children = append(v.Children, item)
+		}
+	}
+	matches := filter == "all" || string(issue.State) == filter
+	if !matches && len(v.Children) == 0 && !contextIDs[issue.ID] {
+		return navIssue{}, false
+	}
+	v.Expanded = contextIDs[issue.ID]
+	return v, true
+}
+
+func (h *handler) toIssueView(issue *model.Issue) (issueView, error) {
 	description, err := h.renderMarkdown(issue.Description)
 	if err != nil {
-		return issuePage{}, err
+		return issueView{}, err
 	}
-	page := issuePage{
+	page := issueView{
 		Title: issue.Title, ID: issue.ID, State: issue.State,
-		Created: formatTime(issue.Created), Updated: formatTime(issue.Updated), ParentID: issue.ParentID,
+		Created: formatTime(issue.Created), Updated: formatTime(issue.Updated),
 		Description: description, Source: issue.Description,
-		Children: make([]treeIssue, 0, len(issue.Children)), Comments: make([]commentView, 0, len(issue.Comments)),
+		Children: make([]issueChoice, 0, len(issue.Children)), Comments: make([]commentView, 0, len(issue.Comments)),
 	}
 	for _, child := range issue.Children {
-		page.Children = append(page.Children, toTreeIssue(child))
+		page.Children = append(page.Children, issueChoice{ID: child.ID, Title: child.Title, State: child.State})
 	}
 	for _, comment := range issue.Comments {
 		body, err := h.renderMarkdown(comment.Body)
 		if err != nil {
-			return issuePage{}, err
+			return issueView{}, err
 		}
 		page.Comments = append(page.Comments, commentView{
-			ID: comment.ID, Author: comment.Author, Created: formatTime(comment.Created), Updated: formatTime(comment.Updated),
+			ID: comment.ID, Author: comment.Author, Created: formatCommentTime(comment.Created), Updated: formatCommentTime(comment.Updated),
 			ShowUpdated: !comment.Updated.Equal(comment.Created), Body: body, Source: comment.Body,
 		})
 	}
@@ -216,6 +317,8 @@ func (h *handler) renderMarkdown(source string) (template.HTML, error) {
 }
 
 func formatTime(t time.Time) string { return t.Format(time.RFC3339Nano) }
+
+func formatCommentTime(t time.Time) string { return t.Format("2006-01-02 15:04 MST") }
 
 func (h *handler) createIssue(w http.ResponseWriter, r *http.Request) {
 	if !h.parseForm(w, r) {
@@ -242,6 +345,19 @@ func (h *handler) updateIssue(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	title, description := r.PostForm.Get("title"), r.PostForm.Get("description")
 	_, err := h.svc.UpdateIssue(r.Context(), service.UpdateIssueRequest{ID: id, Title: &title, Description: &description})
+	if err != nil {
+		h.writeServiceError(w, err, id)
+		return
+	}
+	h.redirectIssue(w, r, id, "")
+}
+
+func (h *handler) moveIssue(w http.ResponseWriter, r *http.Request) {
+	if !h.parseForm(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	_, err := h.svc.MoveIssue(r.Context(), id, r.PostForm.Get("parent_id"))
 	if err != nil {
 		h.writeServiceError(w, err, id)
 		return
@@ -350,6 +466,18 @@ func (h *handler) stylesheet(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(h.css)
+}
+
+func (h *handler) script(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(h.js)
+}
+
+func (h *handler) faviconImage(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(h.favicon)
 }
 
 func (h *handler) render(w http.ResponseWriter, status int, name string, data any) {

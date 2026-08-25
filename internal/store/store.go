@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/tedla-brandsema/tissues/internal/model"
@@ -164,6 +165,86 @@ func (t *Tree) WriteIssue(iss *model.Issue) (string, error) {
 		return "", fmt.Errorf("issue %s: created timestamp is immutable", iss.ID)
 	}
 	return t.writeIssueFile(e.dir, iss)
+}
+
+// MoveIssue changes an issue's parent by moving its complete directory
+// subtree. The issue directory name is preserved; only containment changes.
+// It returns the old and new repository-relative directories so the caller
+// can stage both sides of the rename exactly.
+func (t *Tree) MoveIssue(id, parentID string) (string, string, error) {
+	e, ok := t.issues[id]
+	if !ok {
+		return "", "", fmt.Errorf("unknown issue %q", id)
+	}
+	if parentID == id {
+		return "", "", fmt.Errorf("issue %q cannot be its own parent", id)
+	}
+
+	parentDir := IssuesDir
+	var parent *model.Issue
+	if parentID != "" {
+		pe, ok := t.issues[parentID]
+		if !ok {
+			return "", "", fmt.Errorf("unknown parent issue %q", parentID)
+		}
+		if strings.HasPrefix(pe.dir, e.dir+"/") {
+			return "", "", fmt.Errorf("issue %q cannot be moved beneath its descendant %q", id, parentID)
+		}
+		parentDir = path.Join(pe.dir, IssuesDir)
+		parent = pe.issue
+	}
+	if e.issue.ParentID == parentID {
+		return e.dir, e.dir, nil
+	}
+
+	oldDir := e.dir
+	newDir := path.Join(parentDir, path.Base(oldDir))
+	if err := os.MkdirAll(t.abs(parentDir), 0o755); err != nil {
+		return oldDir, newDir, err
+	}
+	if err := os.Rename(t.abs(oldDir), t.abs(newDir)); err != nil {
+		return oldDir, newDir, err
+	}
+	if _, err := t.writeIssueFile(newDir, e.issue); err != nil {
+		return oldDir, newDir, err
+	}
+
+	oldParentID := e.issue.ParentID
+	for _, entry := range t.issues {
+		if entry.dir == oldDir || strings.HasPrefix(entry.dir, oldDir+"/") {
+			entry.dir = newDir + strings.TrimPrefix(entry.dir, oldDir)
+		}
+	}
+	e.issue.ParentID = parentID
+	if oldParentID == "" {
+		t.roots = removeIssue(t.roots, id)
+	} else {
+		oldParent := t.issues[oldParentID].issue
+		oldParent.Children = removeIssue(oldParent.Children, id)
+	}
+	if parent == nil {
+		t.roots = append(t.roots, e.issue)
+		t.sortIssues(t.roots)
+	} else {
+		parent.Children = append(parent.Children, e.issue)
+		t.sortIssues(parent.Children)
+	}
+	return oldDir, newDir, nil
+}
+
+func removeIssue(issues []*model.Issue, id string) []*model.Issue {
+	for i, iss := range issues {
+		if iss.ID == id {
+			return append(issues[:i], issues[i+1:]...)
+		}
+	}
+	return issues
+}
+
+func (t *Tree) sortIssues(issues []*model.Issue) {
+	sort.Slice(issues, func(i, j int) bool {
+		return path.Base(t.issues[issues[i].ID].dir) < path.Base(t.issues[issues[j].ID].dir)
+	})
 }
 
 // CreateComment writes a new comment on an issue.

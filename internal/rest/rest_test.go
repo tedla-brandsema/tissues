@@ -274,6 +274,29 @@ func TestFullRESTFlow(t *testing.T) {
 	}
 }
 
+func TestMoveIssueThroughREST(t *testing.T) {
+	dir := initRepo(t)
+	srv := newServer(t, dir, false)
+	a := id(t, do(t, srv, "POST", "/api/issues", `{"title":"Alpha"}`))
+	b := id(t, do(t, srv, "POST", "/api/issues", `{"title":"Beta"}`))
+	c := id(t, do(t, srv, "POST", "/api/issues", `{"title":"Gamma","parent_id":"`+a+`"}`))
+
+	moved := want(t, do(t, srv, "PUT", "/api/issues/"+a+"/parent", `{"parent_id":"`+b+`"}`), 200, "PUT", "move")
+	if moved.field(t, "parent_id") != b {
+		t.Fatalf("moved parent_id = %v", moved.field(t, "parent_id"))
+	}
+	assertError(t, do(t, srv, "PUT", "/api/issues/"+b+"/parent", `{"parent_id":"`+c+`"}`), 400, CodeInvalidRequest)
+	detached := want(t, do(t, srv, "PUT", "/api/issues/"+a+"/parent", `{"parent_id":""}`), 200, "PUT", "detach")
+	if detached.field(t, "parent_id") != "" {
+		t.Fatalf("detached parent_id = %v", detached.field(t, "parent_id"))
+	}
+	assertError(t, do(t, srv, "PUT", "/api/issues/"+a+"/parent", `{}`), 400, CodeInvalidRequest)
+	assertError(t, do(t, srv, "PUT", "/api/issues/"+a+"/parent", `{"parent_id":"","extra":true}`), 400, CodeInvalidRequest)
+	if got := git(t, dir, "status", "--porcelain"); got != "" {
+		t.Fatalf("repository dirty: %s", got)
+	}
+}
+
 func commentOrder(t *testing.T, r reply) []string {
 	t.Helper()
 	var issue issueJSON
@@ -408,6 +431,7 @@ func TestStrictJSONDecoding(t *testing.T) {
 		// zero-valued, which made PUT look like a successful no-op update.
 		{"null on create", "POST", "/api/issues", `null`},
 		{"null on update", "PUT", "/api/issues/" + issue, `null`},
+		{"null on move", "PUT", "/api/issues/" + issue + "/parent", `null`},
 		{"null on add comment", "POST", "/api/issues/" + issue + "/comments", `null`},
 		{"null on edit comment", "PUT", "/api/issues/" + issue + "/comments/" + comment, `null`},
 		{"null with whitespace", "PUT", "/api/issues/" + issue, "  \n null \n "},
@@ -418,6 +442,8 @@ func TestStrictJSONDecoding(t *testing.T) {
 		{"boolean body", "POST", "/api/issues/" + issue + "/comments", `true`},
 		{"unknown field", "POST", "/api/issues", `{"title":"X","state":"closed"}`},
 		{"unknown field on update", "PUT", "/api/issues/" + issue, `{"title":"X","created":"2026-01-01T00:00:00Z"}`},
+		{"unknown field on move", "PUT", "/api/issues/" + issue + "/parent", `{"parent_id":"","state":"open"}`},
+		{"missing parent on move", "PUT", "/api/issues/" + issue + "/parent", `{}`},
 		{"unknown field on comment", "POST", "/api/issues/" + issue + "/comments", `{"author":"a@example","body":"x","id":"nope"}`},
 		{"comment id not editable", "PUT", "/api/issues/" + issue + "/comments/" + comment, `{"body":"x","id":"nope"}`},
 		{"comment author not editable", "PUT", "/api/issues/" + issue + "/comments/" + comment, `{"body":"x","author":"someone@else"}`},
@@ -666,6 +692,32 @@ func TestNotPushedMapsTo502WithResult(t *testing.T) {
 	}
 }
 
+func TestMoveNotPushedReturnsMovedIssue(t *testing.T) {
+	dir := initRepo(t)
+	local, err := service.New(context.Background(), dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := local.CreateIssue(context.Background(), service.CreateIssueRequest{Title: "Alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := local.CreateIssue(context.Background(), service.CreateIssueRequest{Title: "Beta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newServer(t, dir, true)
+	r := do(t, srv, "PUT", "/api/issues/"+a.ID+"/parent", `{"parent_id":"`+b.ID+`"}`)
+	m := assertError(t, r, http.StatusBadGateway, CodeNotPushed)
+	result, ok := m["result"].(map[string]any)
+	if !ok || result["id"] != a.ID || result["parent_id"] != b.ID {
+		t.Fatalf("move not_pushed result = %v", m["result"])
+	}
+	if got := git(t, dir, "status", "--porcelain"); got != "" {
+		t.Fatalf("repository dirty: %s", got)
+	}
+}
+
 // --- routing ----------------------------------------------------------------
 
 func TestMethodAndPathHandling(t *testing.T) {
@@ -688,6 +740,7 @@ func TestMethodAndPathHandling(t *testing.T) {
 		{"put on close", "PUT", "/api/issues/" + issue + "/close"},
 		{"get on reopen", "GET", "/api/issues/" + issue + "/reopen"},
 		{"get on comments", "GET", "/api/issues/" + issue + "/comments"},
+		{"post on parent", "POST", "/api/issues/" + issue + "/parent"},
 		{"delete comment", "DELETE", "/api/issues/" + issue + "/comments/" + comment},
 		{"post on comment", "POST", "/api/issues/" + issue + "/comments/" + comment},
 	}

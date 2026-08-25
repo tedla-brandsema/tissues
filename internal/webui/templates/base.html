@@ -4,11 +4,53 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.}} · tissues</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
 </head>
-<body>
-<header class="site-header"><a class="brand" href="/">tissues</a><span>Git-backed issues for humans and agents</span></header>
-<main>{{end}}
-{{define "footer"}}</main>
-</body>
-</html>{{end}}
+<body>{{end}}
+{{define "footer"}}</body></html>{{end}}
+
+{{define "nav-tree"}}
+<ul class="issue-tree">
+  {{range .}}
+  <li>
+    <div class="nav-row{{if .Selected}} selected{{end}}">
+      {{if .Children}}<button class="disclosure" type="button" data-disclosure aria-expanded="{{if .Expanded}}true{{else}}false{{end}}" aria-label="Toggle attached issues"><span aria-hidden="true">{{if .Expanded}}&#9662;{{else}}&#9656;{{end}}</span></button>{{else}}<span class="disclosure-space"></span>{{end}}
+      <span class="state-dot state-{{.State}}" title="{{.State}}"><span class="sr-only">{{.State}}</span></span>
+      <a href="/issues/{{.ID}}?state={{.Filter}}"{{if .Selected}} aria-current="page"{{end}}>{{.Title}}</a>
+    </div>
+    {{if .Children}}<div data-branch{{if not .Expanded}} hidden{{end}}>{{template "nav-tree" .Children}}</div>{{end}}
+  </li>
+  {{end}}
+</ul>
+{{end}}
+
+{{define "workspace"}}
+{{template "header" .Title}}
+<header class="topbar"><a class="brand" href="/" aria-label="tissues"><span class="brand-mark" aria-hidden="true">🤧</span><span class="brand-name">tissues</span></a><button class="primary" type="button" data-dialog-open="create-issue">+ Issue</button></header>
+<main class="workspace">
+  <aside class="navigator" aria-label="Issue navigator">
+    <nav class="filters" aria-label="Issue state"><a href="/?state=open"{{if eq .Filter "open"}} aria-current="page"{{end}}>Open</a><a href="/?state=closed"{{if eq .Filter "closed"}} aria-current="page"{{end}}>Closed</a><a href="/?state=all"{{if eq .Filter "all"}} aria-current="page"{{end}}>All</a></nav>
+    <div class="nav-scroll">{{if .Navigation}}{{template "nav-tree" .Navigation}}{{else}}<p class="empty nav-empty">No {{.Filter}} issues.</p>{{end}}</div>
+  </aside>
+  <section class="detail-pane">{{if .Selected}}{{template "issue-detail" .}}{{else}}<div class="blank-detail"><h1>Issues</h1><p>Select an issue from the navigator or create one.</p></div>{{end}}</section>
+</main>
+<dialog id="create-issue" class="editor-dialog"><form method="post" action="/issues"><header><h2>Create issue</h2><button type="button" class="icon-button" data-dialog-close aria-label="Close">&#215;</button></header><label>Title<input name="title" required data-autofocus></label><label>Description<textarea name="description" rows="8" placeholder="Markdown"></textarea></label><footer><button type="button" class="secondary" data-dialog-close>Cancel</button><button type="submit">Create issue</button></footer></form></dialog>
+{{template "footer" .}}
+{{end}}
+
+{{define "issue-detail"}}
+{{$issue := .Selected}}
+<article class="issue-detail">
+  <header class="issue-heading"><div><h1>{{$issue.Title}}</h1><span class="state-label state-{{$issue.State}}">{{$issue.State}}</span></div><div class="issue-actions"><button type="button" class="secondary" data-dialog-open="edit-issue">Edit</button>{{if eq $issue.State "open"}}<form method="post" action="/issues/{{$issue.ID}}/close"><button class="secondary" type="submit">Close</button></form>{{else}}<form method="post" action="/issues/{{$issue.ID}}/reopen"><button class="secondary" type="submit">Reopen</button></form>{{end}}</div></header>
+  <section class="markdown description">{{if $issue.Description}}{{$issue.Description}}{{else}}<p class="empty">No description.</p>{{end}}</section>
+  <div class="attachment-line">{{if .Parent}}<span>Attached to <a href="/issues/{{.Parent.ID}}?state={{.Filter}}">{{.Parent.Title}}</a></span><div class="compact-actions"><button type="button" class="quiet" data-dialog-open="move-issue">Move</button><form method="post" action="/issues/{{$issue.ID}}/move"><input type="hidden" name="parent_id" value=""><button class="quiet danger" type="submit">Detach</button></form></div>{{else}}<span class="secondary-text">Not attached to another issue</span>{{if .MoveChoices}}<button type="button" class="quiet" data-dialog-open="move-issue">Attach elsewhere</button>{{end}}{{end}}</div>
+  <section class="attached-section"><div class="section-heading"><h2>Attached issues</h2><button type="button" class="secondary" data-dialog-open="attach-issue">Attach issue</button></div>{{if $issue.Children}}<ul class="attached-list">{{range $issue.Children}}<li><span class="state-dot state-{{.State}}"><span class="sr-only">{{.State}}</span></span><a href="/issues/{{.ID}}?state={{$.Filter}}">{{.Title}}</a></li>{{end}}</ul>{{else}}<p class="empty">No issues attached.</p>{{end}}</section>
+  <section class="discussion"><div class="section-heading"><h2>Discussion</h2><span>{{len $issue.Comments}}</span></div><div class="comments">{{range $issue.Comments}}<article class="comment" id="comment-{{.ID}}"><header><strong>{{.Author}}</strong><span>{{.Created}}{{if .ShowUpdated}} · edited {{.Updated}}{{end}}</span><button type="button" class="icon-button" data-dialog-open="edit-comment-{{.ID}}" aria-label="Edit comment">&#8943;</button></header><div class="markdown">{{.Body}}</div></article><dialog id="edit-comment-{{.ID}}" class="editor-dialog"><form method="post" action="/issues/{{$issue.ID}}/comments/{{.ID}}/edit"><header><h2>Edit comment</h2><button type="button" class="icon-button" data-dialog-close aria-label="Close">&#215;</button></header><label>Comment<textarea name="body" rows="8" required data-autofocus>{{.Source}}</textarea></label><footer><button type="button" class="secondary" data-dialog-close>Cancel</button><button type="submit">Save comment</button></footer></form></dialog>{{else}}<p class="empty">No comments yet.</p>{{end}}</div><form class="comment-composer" method="post" action="/issues/{{$issue.ID}}/comments"><label><span>Author</span><input name="author" required placeholder="Your name"></label><label><span>Comment</span><textarea name="body" rows="4" required placeholder="Write a comment..."></textarea></label><button type="submit">Comment</button></form></section>
+  <details class="metadata"><summary>Issue details</summary><dl><div><dt>ID</dt><dd>{{$issue.ID}}</dd></div><div><dt>Created</dt><dd>{{$issue.Created}}</dd></div><div><dt>Updated</dt><dd>{{$issue.Updated}}</dd></div></dl></details>
+</article>
+<dialog id="edit-issue" class="editor-dialog"><form method="post" action="/issues/{{$issue.ID}}/update"><header><h2>Edit issue</h2><button type="button" class="icon-button" data-dialog-close aria-label="Close">&#215;</button></header><label>Title<input name="title" value="{{$issue.Title}}" required data-autofocus></label><label>Description<textarea name="description" rows="10">{{$issue.Source}}</textarea></label><footer><button type="button" class="secondary" data-dialog-close>Cancel</button><button type="submit">Save changes</button></footer></form></dialog>
+<dialog id="move-issue" class="chooser-dialog"><header><div><h2>Move issue</h2><p>Choose where to attach {{$issue.Title}}.</p></div><button type="button" class="icon-button" data-dialog-close aria-label="Close">&#215;</button></header><label class="chooser-filter">Filter issues<input type="search" data-choice-filter data-autofocus placeholder="Search by title"></label><div class="choices" data-choices>{{range .MoveChoices}}<form method="post" action="/issues/{{$issue.ID}}/move" data-choice data-title="{{.Title}}"><input type="hidden" name="parent_id" value="{{.ID}}"><span><span class="state-dot state-{{.State}}"></span>{{.Title}}</span><button class="secondary" type="submit">Attach here</button></form>{{else}}<p class="empty">No available issues.</p>{{end}}</div></dialog>
+<dialog id="attach-issue" class="chooser-dialog"><header><div><h2>Attach issue</h2><p>Choose an existing issue to attach beneath {{$issue.Title}}.</p></div><button type="button" class="icon-button" data-dialog-close aria-label="Close">&#215;</button></header><label class="chooser-filter">Filter issues<input type="search" data-choice-filter data-autofocus placeholder="Search by title"></label><div class="choices" data-choices>{{range .AttachChoices}}<form method="post" action="/issues/{{.ID}}/move" data-choice data-title="{{.Title}}"><input type="hidden" name="parent_id" value="{{$issue.ID}}"><span><span class="state-dot state-{{.State}}"></span>{{.Title}}</span><button class="secondary" type="submit">Attach</button></form>{{else}}<p class="empty">No available issues.</p>{{end}}</div><details class="create-attached"><summary>Create new issue</summary><form method="post" action="/issues"><input type="hidden" name="parent_id" value="{{$issue.ID}}"><label>Title<input name="title" required></label><label>Description<textarea name="description" rows="5"></textarea></label><button type="submit">Create and attach</button></form></details></dialog>
+{{end}}

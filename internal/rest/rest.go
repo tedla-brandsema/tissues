@@ -30,6 +30,7 @@ func New(s *service.Service) http.Handler {
 	// plain text instead.
 	mux.HandleFunc("/api/issues", h.issues)
 	mux.HandleFunc("/api/issues/{id}", h.issue)
+	mux.HandleFunc("/api/issues/{id}/parent", h.parent)
 	mux.HandleFunc("/api/issues/{id}/close", h.close)
 	mux.HandleFunc("/api/issues/{id}/reopen", h.reopen)
 	mux.HandleFunc("/api/issues/{id}/comments", h.comments)
@@ -43,7 +44,7 @@ type handler struct{ svc *service.Service }
 
 // --- method dispatch --------------------------------------------------------
 //
-// One small switch per path. The supported combinations are exactly the eight
+// One small switch per path. The supported combinations are exactly the nine
 // service operations; everything else is 405.
 
 func (h *handler) issues(w http.ResponseWriter, r *http.Request) {
@@ -74,6 +75,14 @@ func (h *handler) close(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.closeIssue(w, r)
+}
+
+func (h *handler) parent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		methodNotAllowed(w, r, http.MethodPut)
+		return
+	}
+	h.moveIssue(w, r)
 }
 
 func (h *handler) reopen(w http.ResponseWriter, r *http.Request) {
@@ -186,6 +195,10 @@ type updateIssueBody struct {
 	Description *string `json:"description"`
 }
 
+type moveIssueBody struct {
+	ParentID *string `json:"parent_id"`
+}
+
 type addCommentBody struct {
 	Author string `json:"author"`
 	Body   string `json:"body"`
@@ -269,6 +282,20 @@ func (h *handler) updateIssue(w http.ResponseWriter, r *http.Request) {
 		Title:       body.Title,
 		Description: body.Description,
 	})
+	h.respondIssue(w, http.StatusOK, iss, err)
+}
+
+func (h *handler) moveIssue(w http.ResponseWriter, r *http.Request) {
+	var body moveIssueBody
+	if err := decode(r, &body); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if body.ParentID == nil {
+		writeBadRequest(w, errors.New("parent_id is required"))
+		return
+	}
+	iss, err := h.svc.MoveIssue(r.Context(), r.PathValue("id"), *body.ParentID)
 	h.respondIssue(w, http.StatusOK, iss, err)
 }
 

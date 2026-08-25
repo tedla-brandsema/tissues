@@ -1463,6 +1463,157 @@ func TestAddCommentUsesTheClockWhenItAdvances(t *testing.T) {
 	}
 }
 
+func TestMoveIssueAttachMoveDetachAndReload(t *testing.T) {
+	ctx := context.Background()
+	dir := initRepo(t)
+	s, c := newService(t, dir, false)
+	a := mustCreate(t, s, "Alpha")
+	b := mustCreate(t, s, "Beta")
+	child, err := s.CreateIssue(ctx, CreateIssueRequest{ParentID: a.ID, Title: "Alpha detail"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	comment, err := s.AddComment(ctx, child.ID, "human@example", "Preserve this.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := a.Created
+	childUpdated := child.Updated
+	base := commitCount(t, dir)
+
+	c.advance(time.Hour)
+	moved, err := s.MoveIssue(ctx, a.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.ParentID != b.ID || !moved.Created.Equal(created) || !moved.Updated.Equal(model.Timestamp(c.t)) {
+		t.Errorf("moved issue = %#v", moved)
+	}
+	if got := git(t, dir, "log", "-1", "--pretty=%s"); got != "move issue "+a.ID+" under "+b.ID {
+		t.Errorf("move subject = %q", got)
+	}
+
+	c.advance(time.Hour)
+	detached, err := s.MoveIssue(ctx, a.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detached.ParentID != "" || !detached.Updated.Equal(model.Timestamp(c.t)) {
+		t.Errorf("detached issue = %#v", detached)
+	}
+	if got := git(t, dir, "log", "-1", "--pretty=%s"); got != "detach issue "+a.ID {
+		t.Errorf("detach subject = %q", got)
+	}
+	if got := commitCount(t, dir); got != base+2 {
+		t.Fatalf("commit count = %d, want %d", got, base+2)
+	}
+	assertClean(t, dir, "after moves")
+
+	fresh, _ := newService(t, dir, false)
+	got, err := fresh.GetIssue(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ParentID != "" || len(got.Children) != 1 || got.Children[0].ID != child.ID {
+		t.Fatalf("reloaded subtree = %#v", got)
+	}
+	if !got.Children[0].Updated.Equal(childUpdated) || len(got.Children[0].Comments) != 1 || got.Children[0].Comments[0].ID != comment.ID {
+		t.Fatalf("reloaded child changed = %#v", got.Children[0])
+	}
+}
+
+func TestMoveIssueNoOpsAndRejectionsDoNotCommit(t *testing.T) {
+	ctx := context.Background()
+	dir := initRepo(t)
+	s, c := newService(t, dir, false)
+	a := mustCreate(t, s, "Alpha")
+	b, err := s.CreateIssue(ctx, CreateIssueRequest{ParentID: a.ID, Title: "Beta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := commitCount(t, dir)
+	updated := b.Updated
+	c.advance(time.Hour)
+
+	for _, tc := range []struct {
+		name   string
+		id     string
+		parent string
+		want   error
+	}{
+		{"same parent", b.ID, a.ID, nil},
+		{"self", a.ID, a.ID, ErrValidation},
+		{"descendant", a.ID, b.ID, ErrValidation},
+		{"unknown issue", strings.Repeat("z", store.IDLen), "", ErrNotFound},
+		{"unknown parent", b.ID, strings.Repeat("y", store.IDLen), ErrNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := s.MoveIssue(ctx, tc.id, tc.parent)
+			if tc.want == nil {
+				if err != nil || got == nil || !got.Updated.Equal(updated) {
+					t.Fatalf("MoveIssue = %#v, %v", got, err)
+				}
+			} else if !errors.Is(err, tc.want) || got != nil {
+				t.Fatalf("MoveIssue = %#v, %v; want nil, %v", got, err, tc.want)
+			}
+			if n := commitCount(t, dir); n != base {
+				t.Fatalf("commit count = %d, want %d", n, base)
+			}
+			assertClean(t, dir, tc.name)
+		})
+	}
+}
+
+func TestMoveIssueIncompleteAndNotPushedOutcomes(t *testing.T) {
+	ctx := context.Background()
+	t.Run("incomplete stages the subtree rename", func(t *testing.T) {
+		dir := initRepo(t)
+		s, _ := newService(t, dir, false)
+		a := mustCreate(t, s, "Alpha")
+		b := mustCreate(t, s, "Beta")
+		child, err := s.CreateIssue(ctx, CreateIssueRequest{ParentID: a.ID, Title: "Nested"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := commitCount(t, dir)
+		hook := filepath.Join(dir, ".git", "hooks", "pre-commit")
+		if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		moved, err := s.MoveIssue(ctx, a.ID, b.ID)
+		if moved != nil || !errors.Is(err, ErrIncomplete) {
+			t.Fatalf("MoveIssue = %#v, %v", moved, err)
+		}
+		if got := commitCount(t, dir); got != base {
+			t.Fatalf("commit count = %d, want %d", got, base)
+		}
+		staged := git(t, dir, "diff", "--cached", "--name-status", "-M")
+		for _, id := range []string{a.ID, child.ID} {
+			if !strings.Contains(staged, id) {
+				t.Errorf("staged rename lacks %s: %s", id, staged)
+			}
+		}
+	})
+
+	t.Run("not pushed returns the durable moved issue", func(t *testing.T) {
+		dir := initRepo(t)
+		local, _ := newService(t, dir, false)
+		a := mustCreate(t, local, "Alpha")
+		b := mustCreate(t, local, "Beta")
+		remote, _ := newService(t, dir, true)
+		moved, err := remote.MoveIssue(ctx, a.ID, b.ID)
+		if moved == nil || moved.ParentID != b.ID || !errors.Is(err, ErrNotPushed) {
+			t.Fatalf("MoveIssue = %#v, %v", moved, err)
+		}
+		assertClean(t, dir, "after unpushed move")
+		fresh, _ := newService(t, dir, false)
+		got, readErr := fresh.GetIssue(ctx, a.ID)
+		if readErr != nil || got.ParentID != b.ID {
+			t.Fatalf("durable move = %#v, %v", got, readErr)
+		}
+	})
+}
+
 func commentIDs(i *model.Issue) []string {
 	ids := make([]string, len(i.Comments))
 	for n, c := range i.Comments {

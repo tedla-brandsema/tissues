@@ -2,6 +2,7 @@ package webui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,7 +33,7 @@ func TestIndexAndIssuePages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	index := request(t, h, http.MethodGet, "/", nil, "")
+	index := request(t, h, http.MethodGet, "/?state=all", nil, "")
 	wantStatus(t, index, http.StatusOK)
 	wantHTMLHeaders(t, index)
 	indexBody := index.Body.String()
@@ -76,6 +77,113 @@ func TestIndexAndIssuePages(t *testing.T) {
 	}
 	if got := git(t, dir, "status", "--porcelain"); got != "" {
 		t.Errorf("reads dirtied repository: %s", got)
+	}
+}
+
+func TestBrandLogoAndFavicon(t *testing.T) {
+	_, _, h := newTestHandler(t, false)
+
+	index := request(t, h, http.MethodGet, "/", nil, "")
+	wantStatus(t, index, http.StatusOK)
+	body := index.Body.String()
+	for _, want := range []string{
+		`<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">`,
+		`<a class="brand" href="/" aria-label="tissues">`,
+		`<span class="brand-mark" aria-hidden="true">🤧</span>`,
+		`<span class="brand-name">tissues</span>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("index missing brand markup %q:\n%s", want, body)
+		}
+	}
+	if got := strings.Count(body, "🤧"); got != 1 {
+		t.Errorf("sneezing-face mark appears %d times, want exactly once", got)
+	}
+
+	favicon := request(t, h, http.MethodGet, "/assets/favicon.svg", nil, "")
+	wantStatus(t, favicon, http.StatusOK)
+	if got := favicon.Header().Get("Content-Type"); got != "image/svg+xml" {
+		t.Errorf("favicon content type = %q", got)
+	}
+	if faviconBody := favicon.Body.String(); !strings.Contains(faviconBody, "<svg") || !strings.Contains(faviconBody, "🤧") {
+		t.Errorf("favicon body does not contain the sneezing-face SVG: %s", faviconBody)
+	}
+}
+
+func TestWorkspaceFilteringDisclosureAndChooser(t *testing.T) {
+	_, svc, h := newTestHandler(t, false)
+	root := createIssue(t, svc, "", "Release planning", "Plan it.")
+	child := createIssue(t, svc, root.ID, "Browser follow-up", "Fix it.")
+	other := createIssue(t, svc, "", "Packaging", "Ship it.")
+	if _, err := svc.CloseIssue(context.Background(), root.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	open := request(t, h, http.MethodGet, "/?state=open", nil, "").Body.String()
+	if !strings.Contains(open, root.Title) || !strings.Contains(open, child.Title) || !strings.Contains(open, other.Title) {
+		t.Fatalf("open view lost issue or ancestry context: %s", open)
+	}
+	closed := request(t, h, http.MethodGet, "/?state=closed", nil, "").Body.String()
+	if !strings.Contains(closed, root.Title) || strings.Contains(closed, child.Title) || strings.Contains(closed, other.Title) {
+		t.Fatalf("closed filter is wrong: %s", closed)
+	}
+	all := request(t, h, http.MethodGet, "/issues/"+child.ID+"?state=all", nil, "").Body.String()
+	for _, want := range []string{
+		`class="workspace"`, `aria-label="Issue navigator"`, `aria-current="page"`,
+		`data-disclosure aria-expanded="true"`, "+ Issue", "Attached to", root.Title,
+		"Attached issues", "Attach issue", "Discussion", `data-choice-filter`,
+		`src="/assets/app.js"`,
+	} {
+		if !strings.Contains(all, want) {
+			t.Errorf("workspace missing %q: %s", want, all)
+		}
+	}
+	for _, forbidden := range []string{"New root issue", "New child issue", "Parent ID", "Child issues"} {
+		if strings.Contains(all, forbidden) {
+			t.Errorf("workspace contains obsolete language %q", forbidden)
+		}
+	}
+	if strings.Contains(all, `data-choice data-title="`+child.Title+`"`) {
+		t.Error("selected issue is offered as its own move destination")
+	}
+
+	js := request(t, h, http.MethodGet, "/assets/app.js", nil, "")
+	wantStatus(t, js, http.StatusOK)
+	if got := js.Header().Get("Content-Type"); got != "text/javascript; charset=utf-8" {
+		t.Errorf("script content type = %q", got)
+	}
+	if strings.Contains(js.Body.String(), "fetch(") || strings.Contains(js.Body.String(), "XMLHttpRequest") {
+		t.Error("presentation script calls an API")
+	}
+	css := request(t, h, http.MethodGet, "/assets/style.css", nil, "")
+	if !strings.Contains(css.Body.String(), "[hidden] { display: none !important; }") {
+		t.Error("author styles can override filtered or collapsed hidden content")
+	}
+}
+
+func TestHTMLAttachMoveDetachFlow(t *testing.T) {
+	dir, _, h := newTestHandler(t, false)
+	a := redirectedID(t, postForm(t, h, "/issues", url.Values{"title": {"Alpha"}}, validOrigin))
+	b := redirectedID(t, postForm(t, h, "/issues", url.Values{"title": {"Beta"}}, validOrigin))
+	c := redirectedID(t, postForm(t, h, "/issues", url.Values{"title": {"Gamma"}}, validOrigin))
+
+	wantRedirect(t, postForm(t, h, "/issues/"+b+"/move", url.Values{"parent_id": {a}}, validOrigin), "/issues/"+b)
+	wantRedirect(t, postForm(t, h, "/issues/"+b+"/move", url.Values{"parent_id": {c}}, validOrigin), "/issues/"+b)
+	wantRedirect(t, postForm(t, h, "/issues/"+b+"/move", url.Values{"parent_id": {""}}, validOrigin), "/issues/"+b)
+
+	fresh, err := service.New(context.Background(), dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, err := fresh.GetIssue(context.Background(), b)
+	if err != nil || issue.ParentID != "" {
+		t.Fatalf("detached issue = %+v, %v", issue, err)
+	}
+	if got := git(t, dir, "log", "-3", "--format=%s"); !strings.Contains(got, "move issue "+b+" under "+a) || !strings.Contains(got, "move issue "+b+" under "+c) || !strings.Contains(got, "detach issue "+b) {
+		t.Fatalf("move subjects = %s", got)
+	}
+	if got := git(t, dir, "status", "--porcelain"); got != "" {
+		t.Fatalf("repository dirty: %s", got)
 	}
 }
 
@@ -250,6 +358,34 @@ func TestNotPushedIsACommittedHTMLWarning(t *testing.T) {
 	}
 	if !strings.Contains(body, `/issues/`+issues[0].ID) {
 		t.Errorf("warning lacks resulting issue link: %s", body)
+	}
+}
+
+func TestMoveNotPushedIsACommittedHTMLWarning(t *testing.T) {
+	dir, svc, h := newTestHandler(t, true)
+	a, err := svc.CreateIssue(context.Background(), service.CreateIssueRequest{Title: "Alpha"})
+	if !errors.Is(err, service.ErrNotPushed) || a == nil {
+		t.Fatalf("create Alpha = %#v, %v", a, err)
+	}
+	b, err := svc.CreateIssue(context.Background(), service.CreateIssueRequest{Title: "Beta"})
+	if !errors.Is(err, service.ErrNotPushed) || b == nil {
+		t.Fatalf("create Beta = %#v, %v", b, err)
+	}
+	r := postForm(t, h, "/issues/"+a.ID+"/move", url.Values{"parent_id": {b.ID}}, validOrigin)
+	wantStatus(t, r, http.StatusBadGateway)
+	if !strings.Contains(r.Body.String(), "Do not submit the form again") || !strings.Contains(r.Body.String(), "/issues/"+a.ID) {
+		t.Fatalf("move warning = %s", r.Body.String())
+	}
+	if got := git(t, dir, "status", "--porcelain"); got != "" {
+		t.Fatalf("repository dirty: %s", got)
+	}
+	fresh, err := service.New(context.Background(), dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, err := fresh.GetIssue(context.Background(), a.ID)
+	if err != nil || moved.ParentID != b.ID {
+		t.Fatalf("durable moved issue = %#v, %v", moved, err)
 	}
 }
 

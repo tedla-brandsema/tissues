@@ -14,7 +14,7 @@ import (
 	"github.com/tedla-brandsema/tissues/internal/service"
 )
 
-const instructions = "tissues is a shared Git-backed issue tracker used by humans and agents. These tools operate on the same issues humans see through REST and Markdown. Issues may recursively contain child issues; open and closed are the only lifecycle states, and comments are shared discussion. There are no claims, queues, assignments, or exclusive agent ownership semantics."
+const instructions = "tissues is a shared Git-backed issue tracker used by humans and agents. These tools operate on the same issues humans see through REST and Markdown. Every issue has the same type and may optionally be attached beneath another issue; open and closed are the only lifecycle states, and comments are shared discussion. There are no claims, queues, assignments, or exclusive agent ownership semantics."
 
 // New returns the stateless Streamable HTTP MCP endpoint for s.
 func New(s *service.Service) http.Handler {
@@ -70,7 +70,7 @@ func newServer(s *service.Service) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:         "update_issue",
-		Description:  "Update an issue title and/or description. Omitted fields remain unchanged; state, ID, parentage, timestamps, children, and comments cannot be set through this tool.",
+		Description:  "Update an issue title and/or description. Omitted fields remain unchanged; use move_issue to change its optional attachment.",
 		OutputSchema: issueSchema(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in updateIssueInput) (*mcp.CallToolResult, issueOutput, error) {
 		issue, err := s.UpdateIssue(ctx, service.UpdateIssueRequest{ID: in.ID, Title: in.Title, Description: in.Description})
@@ -78,8 +78,17 @@ func newServer(s *service.Service) *mcp.Server {
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
+		Name:         "move_issue",
+		Description:  "Move or attach an existing issue beneath another issue. Use an empty parent_id to detach it to the top level. Issues are one type; this changes only their relationship.",
+		OutputSchema: issueSchema(),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in moveIssueInput) (*mcp.CallToolResult, issueOutput, error) {
+		issue, err := s.MoveIssue(ctx, in.ID, in.ParentID)
+		return issueResult(issue, err)
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
 		Name:         "close_issue",
-		Description:  "Close an issue by ID. This is idempotent and does not close child issues.",
+		Description:  "Close an issue by ID. This is idempotent and does not close issues attached beneath it.",
 		OutputSchema: issueSchema(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in issueIDInput) (*mcp.CallToolResult, issueOutput, error) {
 		issue, err := s.CloseIssue(ctx, in.ID)
@@ -130,6 +139,11 @@ type updateIssueInput struct {
 	ID          string  `json:"id" jsonschema:"immutable issue ID"`
 	Title       *string `json:"title,omitempty" jsonschema:"new single-line title; omit to leave unchanged"`
 	Description *string `json:"description,omitempty" jsonschema:"new Markdown description; omit to leave unchanged"`
+}
+
+type moveIssueInput struct {
+	ID       string `json:"id" jsonschema:"immutable issue ID"`
+	ParentID string `json:"parent_id" jsonschema:"required parent issue ID; empty detaches to the top level"`
 }
 
 type addCommentInput struct {

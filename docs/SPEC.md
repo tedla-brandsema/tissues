@@ -180,8 +180,11 @@ and optionally a parent issue.
 A **comment** has an immutable ID, an author, a created timestamp, an updated
 timestamp, and a Markdown body.
 
-An issue may contain child issues and comments. There is nothing else: no
-assignee, no labels, no priority, no workflow, no metadata bag.
+An issue may be attached beneath another issue and may have issues attached
+beneath it. Every issue is the same type; attachment is a mutable relationship,
+not an Epic/Story/Task taxonomy. An issue may also have comments. There is
+nothing else: no assignee, no labels, no priority, no workflow, no metadata
+bag.
 
 `ParentID`, `Children` and `Comments` are *derived*. They are reconstructed
 from the filesystem when the tree is loaded, and never serialized.
@@ -222,10 +225,13 @@ issues/
             └── issues/
 ```
 
-Filesystem containment *is* issue containment. An issue's parent is the issue
-whose `issues/` directory contains it; a top-level issue is one directly
-inside the repository-root `issues/` directory. Moving a directory reparents
-the issue, and nothing inside any document changes.
+Filesystem containment *is* issue attachment. An issue's parent is the issue
+whose `issues/` directory contains it; an unattached issue is one directly
+inside the repository-root `issues/` directory. Moving an issue physically
+renames its complete directory subtree beneath the new container while
+preserving its directory basename. Only the moved issue's `Updated` metadata
+changes; descendants, comments, identity, content, creation times and directory
+names remain unchanged.
 
 **Parent identity is never serialized into `issue.md`.** Containment is the
 single source of truth, so there is nothing to keep in sync.
@@ -395,9 +401,10 @@ parentage reconstructed, comments ordered, and everything validated. There is
 no cache and no index; rescanning is the refresh mechanism.
 
 A `Tree` can look up an issue by ID, look up a comment by ID within an issue,
-create a root or child issue, rewrite an existing issue, create a comment,
-and rewrite an existing comment. Each write returns the repository-relative
-path of the document it wrote, so a future Git layer can stage exact paths.
+create an issue with an optional parent, rewrite or move an existing issue,
+create a comment, and rewrite an existing comment. A move returns both old and
+new repository-relative directory paths so the Git layer can stage the whole
+subtree rename exactly.
 
 Creating an issue takes its parent as an argument, not as a field. An issue
 handed to the store for creation must arrive with `ParentID`, `Children` and
@@ -455,6 +462,13 @@ both timestamps, with `Created == Updated` at creation.
 untouched. The ID, state, creation time, parent, children and comments cannot
 be updated.
 
+`MoveIssue` changes an issue's optional parent. An empty parent ID detaches it
+to the top level. The issue's complete subtree moves with it; identity,
+content, state, comments, creation time, and every descendant timestamp remain
+unchanged. An effective move advances only the moved issue's `Updated`. Unknown
+issues or parents are not found; self-parenting and moving beneath any
+descendant are invalid because they would create a cycle.
+
 `CloseIssue` and `ReopenIssue` change only the state and `Updated`. Closing
 does not cascade to children.
 
@@ -474,7 +488,7 @@ order, carry everything the decision depends on.
 creation time — so an edit can never move a comment, because ordering is
 `Created ASC, ID ASC` and never consults `Updated`.
 
-Only these eight operations exist. No generic filesystem or Git operation is
+Only these nine operations exist. No generic filesystem or Git operation is
 reachable through the service.
 
 ### 3.3 Identity and timestamp ownership
@@ -486,8 +500,9 @@ never supply IDs, state, timestamps, or derived relationships.
 ### 3.4 No-op operations do not commit
 
 An operation that changes nothing succeeds, writes nothing, commits nothing,
-and leaves `Updated` alone: an update whose fields already match, closing a
-closed issue, reopening an open one, editing a comment to its current body.
+and leaves `Updated` alone: an update whose fields already match, a move to the
+current parent (including an already-unattached issue), closing a closed issue,
+reopening an open one, or editing a comment to its current body.
 
 One changed semantic operation produces exactly one commit, with a
 deterministic message:
@@ -495,6 +510,8 @@ deterministic message:
 ```
 create issue <id>: <title>
 update issue <id>
+move issue <id> under <parent-id>
+detach issue <id>
 close issue <id>
 reopen issue <id>
 comment <comment-id> on issue <issue-id>
@@ -502,6 +519,12 @@ edit comment <comment-id> on issue <issue-id>
 ```
 
 No trailers are added and no commit is ever amended.
+
+An effective move stages the old and new issue directory paths explicitly,
+capturing removal and addition of the complete subtree in the same commit.
+It never uses `git add .`. A staging or commit failure after the rename is
+`written but not committed`; a push failure after the commit is `committed
+locally but not pushed`, with the moved issue returned.
 
 ### 3.5 Outcome classes
 
@@ -524,7 +547,7 @@ for every Git failure. A Git failure after canonical files are written is
 "committed locally but not pushed". Confusing the three would tell an adapter
 the wrong thing about whether the caller's change survived.
 
-The result-object rule follows from the table and holds for all six mutating
+The result-object rule follows from the table and holds for all seven mutating
 operations: **a non-nil domain object is returned only when the mutation
 succeeded — including an idempotent no-op — or alongside "committed locally
 but not pushed", where it is committed and durable.** Every other outcome
@@ -549,7 +572,7 @@ search index and no database.
 
 `internal/rest` is a transport adapter over the service. It decodes requests,
 encodes responses and maps outcome classes to status codes. It holds no issue
-or comment semantics, and it reaches the domain only through the eight
+or comment semantics, and it reaches the domain only through the nine
 service operations.
 
 Every request's `context.Context` is passed straight into the service
@@ -562,6 +585,7 @@ GET    /api/issues                                list the complete hierarchy
 POST   /api/issues                                create an issue
 GET    /api/issues/{id}                           one issue, with children and comments
 PUT    /api/issues/{id}                           update title and/or description
+PUT    /api/issues/{id}/parent                    move, attach, or detach
 POST   /api/issues/{id}/close                     close
 POST   /api/issues/{id}/reopen                    reopen
 POST   /api/issues/{id}/comments                  add a comment
@@ -569,7 +593,7 @@ PUT    /api/issues/{id}/comments/{commentID}      edit a comment's body
 ```
 
 That is the whole surface. There is no filtering, pagination, search, delete,
-move, or assignment route.
+or assignment route.
 
 ### 4.2 Representations
 
@@ -611,6 +635,11 @@ Request bodies carry only what the caller may set. Creating an issue takes
 comment takes `author` and `body`; editing one takes `body` alone — the
 transport offers no way to change a comment's ID, author, or either
 timestamp.
+
+Moving takes exactly `{"parent_id":"…"}`. `parent_id` is required in this
+request object but may be the empty string to detach. Success returns the
+ordinary complete issue representation with status 200. The same strict
+object decoder and service outcome mapping apply.
 
 `author` is provenance only. HTTP does not authenticate it (§4.6).
 
@@ -737,7 +766,7 @@ entirely through the shared service.
 
 ### 5.2 Tools
 
-There are exactly eight tools:
+There are exactly nine tools:
 
 | Tool | Arguments |
 |---|---|
@@ -745,6 +774,7 @@ There are exactly eight tools:
 | `get_issue` | `id` |
 | `create_issue` | optional `parent_id`, required `title`, optional `description` |
 | `update_issue` | `id`, optional `title`, optional `description` |
+| `move_issue` | `id`, required `parent_id` (empty detaches) |
 | `close_issue` | `id` |
 | `reopen_issue` | `id` |
 | `add_comment` | `issue_id`, `author`, `body` |
@@ -784,32 +814,46 @@ unsafe.
 ## 6. Browser interface
 
 `internal/webui` is a third thin adapter over the same `*service.Service` used
-by REST and MCP. It uses embedded `html/template` templates and CSS, and emits
-server-rendered HTML without JavaScript or client-side state.
+by REST and MCP. It emits server-rendered HTML from embedded templates and
+uses embedded CSS plus a small same-origin script for dialogs, navigator
+disclosure, chooser filtering and focus. The script holds no domain state and
+makes no API calls; all mutations remain ordinary forms and 303 redirects.
 
 ### 6.1 Routes
 
 ```
-GET  /                                             complete recursive hierarchy
-GET  /issues/{id}                                 issue detail
-POST /issues                                      create a root or child issue
+GET  /                                             issue workspace (Open by default)
+GET  /issues/{id}                                 workspace with issue selected
+POST /issues                                      create an issue, optionally attached
 POST /issues/{id}/update                          update title and description
+POST /issues/{id}/move                            move, attach, or detach
 POST /issues/{id}/close                           close
 POST /issues/{id}/reopen                          reopen
 POST /issues/{id}/comments                        add a comment
 POST /issues/{id}/comments/{commentID}/edit       edit a comment body
 GET  /assets/style.css                            embedded stylesheet
+GET  /assets/app.js                               embedded presentation script
 ```
 
 Forms use `application/x-www-form-urlencoded` and expose only caller-owned
 fields. Successful mutations, including no-ops, return `303 See Other` to the
 created or changed issue; comment redirects include the comment fragment.
 
-The index renders the service-provided hierarchy without reordering it. Issue
-pages show state and timestamps, rendered descriptions, child links, comments
-in canonical order, and the meaningful close or reopen action. Raw Markdown
-source is retained in edit textareas. IDs remain URL and secondary metadata,
-not the primary issue label.
+Every normal page is a two-pane workspace: a persistent compact navigator on
+the left and the selected issue's content on the right. Open, Closed and All
+views filter the navigator without reordering service results and retain
+ancestry needed to understand attachment. Disclosure buttons collapse
+subtrees; a selected issue and its ancestors start expanded. Titles, state
+indicators and hierarchy dominate navigation, never IDs.
+
+The detail pane leads with title, rendered description, current attachment by
+title, attached issues, and discussion. State, edit, attach, move and detach
+are compact controls; editors and title-based choosers open on demand rather
+than remaining visible. Choosers exclude the selected issue and relationships
+that could create cycles, while the service independently enforces the rule.
+Comments remain in canonical order with one composer after the conversation.
+Raw Markdown remains available in focused editors. Exact timestamps and IDs
+are secondary metadata.
 
 ### 6.2 Markdown and template safety
 
@@ -831,7 +875,7 @@ webpages; it is not authentication and does not alter the unsupported status
 of remote exposure.
 
 HTML responses set a fixed policy containing `default-src 'self'`,
-`script-src 'none'`, `object-src 'none'`, `base-uri 'none'`,
+`script-src 'self'`, `object-src 'none'`, `base-uri 'none'`,
 `form-action 'self'`, and `frame-ancestors 'none'`. They also set
 `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin`. The
 browser mutation guard requires a usable same-origin `Origin`; this policy

@@ -24,6 +24,7 @@ var toolNames = []string{
 	"edit_comment",
 	"get_issue",
 	"list_issues",
+	"move_issue",
 	"reopen_issue",
 	"update_issue",
 }
@@ -156,6 +157,7 @@ func TestToolRegistrationAndSchemas(t *testing.T) {
 
 	wantRequired(t, byName["create_issue"], []string{"title"}, []string{"parent_id", "description"})
 	wantRequired(t, byName["update_issue"], []string{"id"}, []string{"title", "description"})
+	wantRequired(t, byName["move_issue"], []string{"id", "parent_id"}, nil)
 	wantRequired(t, byName["add_comment"], []string{"issue_id", "author", "body"}, nil)
 	wantRequired(t, byName["edit_comment"], []string{"issue_id", "comment_id", "body"}, nil)
 	if byName["create_issue"].OutputSchema == nil || byName["list_issues"].OutputSchema == nil {
@@ -254,6 +256,31 @@ func TestFullMCPSemanticFlow(t *testing.T) {
 	}
 }
 
+func TestMoveIssueThroughMCP(t *testing.T) {
+	dir := initRepo(t)
+	session := connect(t, newService(t, dir, false))
+	a := structured[issueOutput](t, call(t, session, "create_issue", map[string]any{"title": "Alpha"}))
+	b := structured[issueOutput](t, call(t, session, "create_issue", map[string]any{"title": "Beta"}))
+	c := structured[issueOutput](t, call(t, session, "create_issue", map[string]any{"title": "Gamma", "parent_id": a.ID}))
+
+	moved := structured[issueOutput](t, call(t, session, "move_issue", map[string]any{"id": a.ID, "parent_id": b.ID}))
+	if moved.ParentID != b.ID || len(moved.Children) != 1 || moved.Children[0].ID != c.ID {
+		t.Fatalf("moved issue = %+v", moved)
+	}
+	cycle := call(t, session, "move_issue", map[string]any{"id": b.ID, "parent_id": c.ID})
+	if !strings.Contains(errorText(t, cycle), "invalid request") {
+		t.Fatalf("cycle result = %+v", cycle)
+	}
+	detached := structured[issueOutput](t, call(t, session, "move_issue", map[string]any{"id": a.ID, "parent_id": ""}))
+	if detached.ParentID != "" || len(detached.Children) != 1 {
+		t.Fatalf("detached issue = %+v", detached)
+	}
+	missingParent := call(t, session, "move_issue", map[string]any{"id": a.ID})
+	if !strings.Contains(errorText(t, missingParent), "parent_id") {
+		t.Fatalf("missing parent_id result = %+v", missingParent)
+	}
+}
+
 func TestOrdinaryServiceErrorsAreToolErrors(t *testing.T) {
 	t.Run("validation and not found", func(t *testing.T) {
 		dir := initRepo(t)
@@ -344,12 +371,22 @@ func TestNotPushedRetainsStructuredIssueAndComment(t *testing.T) {
 	if comment.ID == "" || comment.Body != "Also durable locally." {
 		t.Fatalf("structured comment = %+v", comment)
 	}
-	if commitCount(t, dir) != 2 || git(t, dir, "status", "--porcelain") != "" {
+	parentResult := call(t, session, "create_issue", map[string]any{"title": "Destination"})
+	parent := structured[issueOutput](t, parentResult)
+	moveResult := call(t, session, "move_issue", map[string]any{"id": created.ID, "parent_id": parent.ID})
+	if !strings.Contains(errorText(t, moveResult), "do not blindly retry") {
+		t.Fatalf("move warning = %q", errorText(t, moveResult))
+	}
+	moved := structured[issueOutput](t, moveResult)
+	if moved.ID != created.ID || moved.ParentID != parent.ID {
+		t.Fatalf("structured moved issue = %+v", moved)
+	}
+	if commitCount(t, dir) != 4 || git(t, dir, "status", "--porcelain") != "" {
 		t.Fatal("not_pushed mutations are not clean durable local commits")
 	}
 	fresh := newService(t, dir, false)
 	issue, err := fresh.GetIssue(context.Background(), created.ID)
-	if err != nil || len(issue.Comments) != 1 || issue.Comments[0].ID != comment.ID {
+	if err != nil || issue.ParentID != parent.ID || len(issue.Comments) != 1 || issue.Comments[0].ID != comment.ID {
 		t.Fatalf("fresh service issue = %+v, err = %v", issue, err)
 	}
 }
@@ -367,7 +404,7 @@ func TestStreamableHTTP(t *testing.T) {
 	}
 	defer session.Close()
 	listed, err := session.ListTools(context.Background(), nil)
-	if err != nil || len(listed.Tools) != 8 {
+	if err != nil || len(listed.Tools) != 9 {
 		t.Fatalf("HTTP ListTools = %+v, err = %v", listed, err)
 	}
 	created := structured[issueOutput](t, call(t, session, "create_issue", map[string]any{"title": "Over Streamable HTTP"}))

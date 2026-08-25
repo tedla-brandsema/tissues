@@ -177,14 +177,42 @@ func TestServerHandlerSharesServiceBetweenWebRESTAndMCP(t *testing.T) {
 	if got["title"] != "Created through browser" {
 		t.Fatalf("MCP did not see browser issue: %v", got)
 	}
-	callToolJSON(t, session, "add_comment", map[string]any{
-		"issue_id": issueID, "author": "agent", "body": "Visible in the browser.",
-	})
+	destination := callToolJSON(t, session, "create_issue", map[string]any{"title": "Attachment destination"})
+	destinationID, _ := destination["id"].(string)
+	callToolJSON(t, session, "move_issue", map[string]any{"id": issueID, "parent_id": destinationID})
+	restIssue = requestJSON(t, httpServer.Client(), http.MethodGet, httpServer.URL+"/api/issues/"+issueID, "")
+	if restIssue["parent_id"] != destinationID {
+		t.Fatalf("REST did not see MCP move: %v", restIssue)
+	}
 	page, err := httpServer.Client().Get(httpServer.URL + "/issues/" + issueID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	pageBody, err := io.ReadAll(page.Body)
+	page.Body.Close()
+	if err != nil || !strings.Contains(string(pageBody), "Attached to") || !strings.Contains(string(pageBody), "Attachment destination") {
+		t.Fatalf("browser did not see MCP move: %v\n%s", err, pageBody)
+	}
+
+	requestJSON(t, httpServer.Client(), http.MethodPut, httpServer.URL+"/api/issues/"+issueID+"/parent", `{"parent_id":""}`)
+	got = callToolJSON(t, session, "get_issue", map[string]any{"id": issueID})
+	if got["parent_id"] != "" {
+		t.Fatalf("MCP did not see REST detach: %v", got)
+	}
+	requestBrowserForm(t, httpServer.Client(), httpServer.URL, "/issues/"+issueID+"/move", url.Values{"parent_id": {destinationID}})
+	restIssue = requestJSON(t, httpServer.Client(), http.MethodGet, httpServer.URL+"/api/issues/"+issueID, "")
+	got = callToolJSON(t, session, "get_issue", map[string]any{"id": issueID})
+	if restIssue["parent_id"] != destinationID || got["parent_id"] != destinationID {
+		t.Fatalf("REST/MCP did not see browser move: REST=%v MCP=%v", restIssue, got)
+	}
+	callToolJSON(t, session, "add_comment", map[string]any{
+		"issue_id": issueID, "author": "agent", "body": "Visible in the browser.",
+	})
+	page, err = httpServer.Client().Get(httpServer.URL + "/issues/" + issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageBody, err = io.ReadAll(page.Body)
 	page.Body.Close()
 	if err != nil {
 		t.Fatal(err)

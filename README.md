@@ -71,9 +71,11 @@ never sweep your changes into its commits.
 ## Browser
 
 Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) after starting the
-server. The server-rendered interface uses the same issues and service as REST
-and MCP, requires no JavaScript, safely renders Markdown, and supports the
-ordinary issue and comment lifecycle operations.
+server. The compact workspace keeps an Open/Closed/All issue navigator beside
+the selected issue, safely renders Markdown, and supports editing, discussion,
+and title-based attachment without copying IDs. A small embedded script handles
+dialogs, disclosure controls, and chooser filtering; mutations remain ordinary
+same-origin forms handled by the shared service.
 
 ## REST
 
@@ -81,7 +83,7 @@ ordinary issue and comment lifecycle operations.
 # list the whole issue hierarchy
 curl -s localhost:8080/api/issues
 
-# create an issue (add "parent_id" to create a child)
+# create an issue (parent_id is optional)
 curl -s -X POST localhost:8080/api/issues \
   -d '{"title":"Fix token refresh","description":"It expires early."}'
 
@@ -91,11 +93,15 @@ curl -s -X POST localhost:8080/api/issues/$ID/comments \
 
 # close it
 curl -s -X POST localhost:8080/api/issues/$ID/close
+
+# attach it beneath another issue, or use "" to detach
+curl -s -X PUT localhost:8080/api/issues/$ID/parent \
+  -d '{"parent_id":"'$OTHER_ID'"}'
 ```
 
-The full route set is eight endpoints: list and create issues, get and update
-one issue, close, reopen, add a comment, edit a comment. See `docs/SPEC.md`
-for the request and response shapes and the error codes.
+The route set covers nine service operations: list, create, get, update, move,
+close, reopen, add a comment, and edit a comment. See `docs/SPEC.md` for the
+request and response shapes and the error codes.
 
 One note worth knowing before you write a client: a `502` with
 `"code": "not_pushed"` means the change **was** committed to your local Git
@@ -105,7 +111,7 @@ publishes the backlog.
 
 ## MCP
 
-The same server exposes the eight service operations as MCP tools over
+The same server exposes the nine service operations as MCP tools over
 Streamable HTTP:
 
 ```text
@@ -113,9 +119,11 @@ http://127.0.0.1:8080/mcp
 ```
 
 The tools are `list_issues`, `get_issue`, `create_issue`, `update_issue`,
-`close_issue`, `reopen_issue`, `add_comment`, and `edit_comment`. MCP and REST
-share one service and one repository, so agents and humans see the same issue
-hierarchy and comments. There is no stdio mode.
+`move_issue`, `close_issue`, `reopen_issue`, `add_comment`, and `edit_comment`.
+Issues are one type: `move_issue` changes only the optional attachment, and an
+empty `parent_id` detaches to the top level. MCP and REST share one service and
+one repository, so agents and humans see the same hierarchy and comments.
+There is no stdio mode.
 
 An MCP tool result marked as an error because a push failed still carries the
 committed issue or comment as structured output. Its warning says that the

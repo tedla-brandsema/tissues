@@ -172,6 +172,88 @@ func TestCreateIssueTreeAndReload(t *testing.T) {
 	}
 }
 
+func TestMoveIssuePreservesSubtreeAndDirectoryName(t *testing.T) {
+	root := t.TempDir()
+	now := ts("2026-08-23T13:00:00Z")
+	tree := mustLoad(t, root)
+	a := newIssue(NewID(), "Alpha", now)
+	b := newIssue(NewID(), "Beta", now.Add(time.Minute))
+	c := newIssue(NewID(), "Gamma", now.Add(2*time.Minute))
+	for _, create := range []struct {
+		parent string
+		issue  *model.Issue
+	}{{"", a}, {"", b}, {a.ID, c}} {
+		if _, err := tree.CreateIssue(create.parent, create.issue); err != nil {
+			t.Fatal(err)
+		}
+	}
+	comment := newComment(NewID(), "human@example", now.Add(3*time.Minute), "Still here.")
+	if _, err := tree.CreateComment(c.ID, comment); err != nil {
+		t.Fatal(err)
+	}
+	oldDir, _ := tree.IssueDir(a.ID)
+	oldBase := filepath.Base(oldDir)
+	a.Updated = now.Add(4 * time.Minute)
+	gotOld, newDir, err := tree.MoveIssue(a.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotOld != oldDir || filepath.Base(newDir) != oldBase {
+		t.Fatalf("move paths = %q -> %q, want old path and preserved basename %q", gotOld, newDir, oldBase)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(oldDir))); !os.IsNotExist(err) {
+		t.Errorf("old directory still exists: %v", err)
+	}
+
+	fresh := mustLoad(t, root)
+	moved, _ := fresh.Issue(a.ID)
+	if moved.ParentID != b.ID || len(moved.Children) != 1 || moved.Children[0].ID != c.ID {
+		t.Fatalf("moved subtree = %#v", moved)
+	}
+	grandchild, _ := fresh.Issue(c.ID)
+	if grandchild.ParentID != a.ID || len(grandchild.Comments) != 1 || grandchild.Comments[0].ID != comment.ID {
+		t.Fatalf("grandchild after move = %#v", grandchild)
+	}
+	if !moved.Created.Equal(now) || !moved.Updated.Equal(now.Add(4*time.Minute)) {
+		t.Errorf("moved timestamps = %v / %v", moved.Created, moved.Updated)
+	}
+
+	detachOld, detachNew, err := fresh.MoveIssue(a.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detachOld != newDir || filepath.Base(detachNew) != oldBase {
+		t.Errorf("detach paths = %q -> %q", detachOld, detachNew)
+	}
+	detached, _ := mustLoad(t, root).Issue(a.ID)
+	if detached.ParentID != "" || len(detached.Children) != 1 {
+		t.Fatalf("detached subtree = %#v", detached)
+	}
+}
+
+func TestMoveIssueRejectsInvalidParentsBeforeWriting(t *testing.T) {
+	root := t.TempDir()
+	now := ts("2026-08-23T13:00:00Z")
+	tree := mustLoad(t, root)
+	a := newIssue(NewID(), "Alpha", now)
+	b := newIssue(NewID(), "Beta", now)
+	if _, err := tree.CreateIssue("", a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tree.CreateIssue(a.ID, b); err != nil {
+		t.Fatal(err)
+	}
+	oldDir, _ := tree.IssueDir(a.ID)
+	for _, parent := range []string{a.ID, b.ID, fixedID('z')} {
+		if _, _, err := tree.MoveIssue(a.ID, parent); err == nil {
+			t.Errorf("MoveIssue(parent %q) succeeded", parent)
+		}
+	}
+	if got, _ := tree.IssueDir(a.ID); got != oldDir {
+		t.Errorf("issue moved after rejection: %q -> %q", oldDir, got)
+	}
+}
+
 // Parentage comes from containment only: the documents never mention it, and
 // moving a directory reparents the issue.
 func TestHierarchyIsDerivedFromContainment(t *testing.T) {
