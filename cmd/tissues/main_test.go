@@ -2,11 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/tedla-brandsema/tissues/internal/service"
 )
 
 func TestRunRejectsBadCommands(t *testing.T) {
@@ -116,4 +124,121 @@ func TestServeAcceptsEmptyRepository(t *testing.T) {
 	if !errors.As(err, &opErr) || opErr.Op != "listen" {
 		t.Errorf("error = %v, want a listen failure (startup validation should have passed)", err)
 	}
+}
+
+// serverHandler must expose both adapters over the exact same service
+// pointer. This proves cross-transport visibility in both directions.
+func TestServerHandlerSharesServiceBetweenRESTAndMCP(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-b", "main"},
+		{"config", "user.name", "tissues"},
+		{"config", "user.email", "tissues@example"},
+		{"config", "commit.gpgsign", "false"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	svc, err := service.New(context.Background(), dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(serverHandler(svc))
+	defer httpServer.Close()
+
+	created := requestJSON(t, httpServer.Client(), http.MethodPost, httpServer.URL+"/api/issues", `{"title":"Created through REST"}`)
+	issueID, _ := created["id"].(string)
+	if issueID == "" {
+		t.Fatalf("REST create result = %v", created)
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "parity-test", Version: "v0"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:             httpServer.URL + "/mcp",
+		HTTPClient:           httpServer.Client(),
+		DisableStandaloneSSE: true,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	got := callToolJSON(t, session, "get_issue", map[string]any{"id": issueID})
+	if got["title"] != "Created through REST" {
+		t.Fatalf("MCP did not see REST issue: %v", got)
+	}
+	callToolJSON(t, session, "add_comment", map[string]any{
+		"issue_id": issueID, "author": "agent", "body": "Visible to humans.",
+	})
+	restIssue := requestJSON(t, httpServer.Client(), http.MethodGet, httpServer.URL+"/api/issues/"+issueID, "")
+	comments, _ := restIssue["comments"].([]any)
+	if len(comments) != 1 || comments[0].(map[string]any)["body"] != "Visible to humans." {
+		t.Fatalf("REST did not see MCP comment: %v", restIssue)
+	}
+
+	callToolJSON(t, session, "close_issue", map[string]any{"id": issueID})
+	restIssue = requestJSON(t, httpServer.Client(), http.MethodGet, httpServer.URL+"/api/issues/"+issueID, "")
+	if restIssue["state"] != "closed" {
+		t.Fatalf("REST did not see MCP close: %v", restIssue)
+	}
+	requestJSON(t, httpServer.Client(), http.MethodPut, httpServer.URL+"/api/issues/"+issueID, `{"description":"Refined through REST."}`)
+	got = callToolJSON(t, session, "get_issue", map[string]any{"id": issueID})
+	if got["description"] != "Refined through REST." || got["state"] != "closed" {
+		t.Fatalf("MCP did not see final REST mutation: %v", got)
+	}
+}
+
+func requestJSON(t *testing.T, client *http.Client, method, url, body string) map[string]any {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		t.Fatalf("%s %s: status %d: %s", method, url, resp.StatusCode, data)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func callToolJSON(t *testing.T, session *mcp.ClientSession, name string, arguments any) map[string]any {
+	t.Helper()
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: arguments})
+	if err != nil {
+		t.Fatalf("CallTool(%s): %v", name, err)
+	}
+	if result.IsError {
+		t.Fatalf("CallTool(%s) returned a tool error: %+v", name, result.Content)
+	}
+	data, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(data, &output); err != nil {
+		t.Fatal(err)
+	}
+	return output
 }

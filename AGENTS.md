@@ -36,8 +36,8 @@ not in an adapter.
 - Canonical issue data is Markdown on disk. The filesystem is the state;
   there is no cache and no index.
 - Use the standard library where practical. Third-party dependencies are
-  added only when a task concretely requires one (currently: Goldmark for
-  rendering, the official Go MCP SDK for MCP — neither is needed yet).
+  added only when a task concretely requires one (currently: the official Go
+  MCP SDK; Goldmark is reserved for implemented rendering work).
 - Do not add queues, workflow engines, labels, priorities, assignment,
   databases, JavaScript frameworks, Git libraries, or GitHub API integration
   unless a later task explicitly asks for them.
@@ -68,6 +68,9 @@ Do not commit or push unless the task explicitly asks for it.
 - `internal/rest` — the HTTP transport adapter. REST is a transport adapter;
   issue and comment semantics stay in `internal/service`. Transport JSON
   shapes live here so `internal/model` carries no JSON tags.
+- `internal/mcpserver` — the MCP transport adapter. Its eight tools map
+  directly to service operations; MCP representations and schema concerns
+  stay here, and domain semantics stay in `internal/service`.
 - `cmd/tissues` — the `tissues serve` executable. Flags only; it adds no Git
   or domain behaviour of its own.
 
@@ -78,5 +81,8 @@ Two rules in the service are load-bearing, not stylistic:
   identical to a running one.
 - Every mutation requires a clean working tree and index, and stages exact
   paths. `git add .` must never appear.
+- REST and MCP in one served repository must share the same
+  `*service.Service`; never construct per-adapter services with separate
+  mutexes.
 - The HTTP listener defaults to loopback. v0 has no authentication and the
   process may hold Git push credentials, so do not change that default.

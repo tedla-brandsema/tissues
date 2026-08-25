@@ -418,9 +418,9 @@ persistence.
 ## 3. Interface/application semantics
 
 One application service owns every issue and comment operation. Adapters over
-it are thin transports that own no domain semantics of their own. A REST API
-and the `tissues serve` command are implemented (§4). **MCP, HTML rendering
-and any browser interface are not implemented.**
+it are thin transports that own no domain semantics of their own. REST, MCP
+and the `tissues serve` command are implemented (§4, §5). **HTML rendering and
+any browser interface are not implemented.**
 
 ### 3.1 The service
 
@@ -706,14 +706,75 @@ tissues serve [-repo .] [-addr 127.0.0.1:8080] [-remote-sync=true]
 `-remote-sync` selects between the two existing service modes. The command
 introduces no third Git behaviour.
 
-At startup the command constructs the service, which verifies the directory
-is a Git working tree, and then reads and validates the entire issue tree
-once before listening. A repository that is not valid Git, or that holds
-invalid tissues content, fails at startup rather than on the first request. A
-repository with no `issues/` directory is valid and starts normally.
+At startup the command constructs one service, which verifies the directory
+is a Git working tree, and then reads and validates the entire issue tree once
+before listening. The same service pointer backs REST at `/api/` and MCP at
+`/mcp`, so both transports share one mutex and one transaction sequence. A
+repository that is not valid Git, or that holds invalid tissues content,
+fails at startup rather than on the first request. A repository with no
+`issues/` directory is valid and starts normally.
 
 tissues never initializes a repository, creates one, or configures a remote.
 Those stay ordinary Git responsibilities.
 
 `tissues` with no command, or with an unknown command, prints usage and exits
 non-zero. `SIGINT` and `SIGTERM` shut the server down gracefully.
+
+---
+
+## 5. MCP interface
+
+`internal/mcpserver` is a transport adapter over the same application service
+as REST. MCP tools do not define separate issue or comment semantics.
+
+### 5.1 Transport
+
+MCP is served at `/mcp` on the same HTTP server as REST, using the official Go
+MCP SDK's Streamable HTTP handler. The handler is stateless and uses JSON
+responses. Stateless mode means tissues retains no MCP application session
+state and makes no server-to-client requests; each bounded tool call operates
+entirely through the shared service.
+
+### 5.2 Tools
+
+There are exactly eight tools:
+
+| Tool | Arguments |
+|---|---|
+| `list_issues` | none |
+| `get_issue` | `id` |
+| `create_issue` | optional `parent_id`, required `title`, optional `description` |
+| `update_issue` | `id`, optional `title`, optional `description` |
+| `close_issue` | `id` |
+| `reopen_issue` | `id` |
+| `add_comment` | `issue_id`, `author`, `body` |
+| `edit_comment` | `issue_id`, `comment_id`, `body` |
+
+Inputs and outputs are typed. The SDK infers their JSON Schemas from Go
+types, except for the recursive issue output: SDK v1.7.0 rejects recursive Go
+types during inference, so tissues supplies the equivalent recursive output
+schema explicitly.
+
+### 5.3 Results
+
+Issue results contain `id`, `title`, `state`, canonical `created` and `updated`
+strings, `description`, `parent_id`, recursive `children`, and `comments`.
+Comment results contain `id`, `author`, canonical `created` and `updated`
+strings, and `body`. Empty issue lists, children, and comments are empty arrays.
+Filesystem paths and Git metadata are not exposed.
+
+Ordinary service failures become MCP tool results with `IsError=true` and
+useful text content. They are tool execution failures, not JSON-RPC protocol
+errors, and carry no structured result.
+
+`ErrNotPushed` is also returned with `IsError=true`, but it retains the normal
+structured issue or comment result. Its warning states that the mutation is a
+durable local Git commit, publication failed, and the caller must not blindly
+retry it.
+
+### 5.4 Security
+
+MCP has no authentication or authorization. The loopback listener default is
+therefore load-bearing. REST and MCP use the same process Git credentials;
+exposing either interface directly to an untrusted network is unsupported and
+unsafe.

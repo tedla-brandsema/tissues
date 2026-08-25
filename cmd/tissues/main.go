@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tedla-brandsema/tissues/internal/mcpserver"
 	"github.com/tedla-brandsema/tissues/internal/rest"
 	"github.com/tedla-brandsema/tissues/internal/service"
 )
@@ -101,9 +102,9 @@ func serve(cfg serveConfig, out io.Writer) error {
 		return err
 	}
 
-	srv := &http.Server{Addr: cfg.addr, Handler: rest.New(svc)}
+	srv := &http.Server{Addr: cfg.addr, Handler: serverHandler(svc)}
 	logger.Printf("tissues: repository %s, remote-sync=%v", cfg.repo, cfg.remoteSync)
-	logger.Printf("tissues: listening on http://%s", cfg.addr)
+	logger.Printf("tissues: listening on http://%s (REST: /api, MCP: /mcp)", cfg.addr)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
@@ -121,4 +122,11 @@ func serve(cfg serveConfig, out io.Writer) error {
 		defer cancel()
 		return srv.Shutdown(shutdown)
 	}
+}
+
+func serverHandler(svc *service.Service) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", mcpserver.New(svc))
+	mux.Handle("/", rest.New(svc))
+	return mux
 }

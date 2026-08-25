@@ -5,8 +5,9 @@ humans and agents.
 
 Issues and comments are ordinary Markdown files in an ordinary Git
 repository. tissues adds only the things Git does not: immutable IDs, domain
-timestamps, open/closed state, containment, comment ordering, and a REST API
-over all of it. Git keeps the history, the replication and the remotes.
+timestamps, open/closed state, containment, comment ordering, and REST and MCP
+interfaces over all of it. Git keeps the history, the replication and the
+remotes.
 
 ## Build
 
@@ -14,7 +15,7 @@ over all of it. Git keeps the history, the replication and the remotes.
 go build -o tissues ./cmd/tissues
 ```
 
-No third-party dependencies.
+The MCP interface uses the official Go MCP SDK.
 
 ## Prepare an issue repository
 
@@ -95,12 +96,30 @@ repository and only the push to the remote failed. Do not retry the request —
 the issue or comment already exists. Fix the remote and the next change
 publishes the backlog.
 
+## MCP
+
+The same server exposes the eight service operations as MCP tools over
+Streamable HTTP:
+
+```text
+http://127.0.0.1:8080/mcp
+```
+
+The tools are `list_issues`, `get_issue`, `create_issue`, `update_issue`,
+`close_issue`, `reopen_issue`, `add_comment`, and `edit_comment`. MCP and REST
+share one service and one repository, so agents and humans see the same issue
+hierarchy and comments. There is no stdio mode.
+
+An MCP tool result marked as an error because a push failed still carries the
+committed issue or comment as structured output. Its warning says that the
+mutation exists locally and must not be blindly repeated.
+
 ## Safety
 
-**v0 has no HTTP authentication.** The default listener is loopback-only.
-Do not expose it directly to an untrusted network: anyone who can reach the
-port can create, edit and close issues, and can cause the process to push to
-your Git remote with its credentials.
+**v0 has no HTTP authentication.** This applies to REST and MCP. The default
+listener is loopback-only. Do not expose it directly to an untrusted network:
+anyone who can reach the port can create, edit and close issues, and can cause
+the process to push to your Git remote with its credentials.
 
 ## Canonical storage
 
@@ -131,5 +150,5 @@ are the state.
 
 ## Not implemented in v0
 
-MCP and a browser UI do not exist yet. Neither does authentication,
-assignment, labels, priorities, queues, workflow, or search.
+A browser UI does not exist yet. Neither does authentication, assignment,
+labels, priorities, queues, workflow, or search.
