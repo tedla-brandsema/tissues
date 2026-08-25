@@ -356,10 +356,13 @@ func wantHTMLHeaders(t *testing.T, rr *httptest.ResponseRecorder) {
 	if got := rr.Header().Get("Content-Type"); got != "text/html; charset=utf-8" {
 		t.Errorf("Content-Type = %q", got)
 	}
+	// Browser form POSTs need a non-null Origin for the server-side mutation
+	// guard; Referrer-Policy: no-referrer can turn that Origin into null,
+	// causing tissues to reject its own forms.
 	for name, want := range map[string]string{
 		"Content-Security-Policy": contentSecurityPolicy,
 		"X-Content-Type-Options":  "nosniff",
-		"Referrer-Policy":         "no-referrer",
+		"Referrer-Policy":         "same-origin",
 	} {
 		if got := rr.Header().Get(name); got != want {
 			t.Errorf("%s = %q, want %q", name, got, want)

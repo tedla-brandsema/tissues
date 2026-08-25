@@ -107,7 +107,7 @@ func (h *handler) secure(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Referrer-Policy", "same-origin")
 		if r.Method == http.MethodPost && !sameLoopbackOrigin(r) {
 			h.writeErrorPage(w, http.StatusForbidden, "Request blocked", "Mutation forms are accepted only from this local tissues page.", "", "")
 			return

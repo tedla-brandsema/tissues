@@ -833,7 +833,10 @@ of remote exposure.
 HTML responses set a fixed policy containing `default-src 'self'`,
 `script-src 'none'`, `object-src 'none'`, `base-uri 'none'`,
 `form-action 'self'`, and `frame-ancestors 'none'`. They also set
-`X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
+`X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin`. The
+browser mutation guard requires a usable same-origin `Origin`; this policy
+preserves it for local UI submissions while suppressing referrer information
+cross-origin.
 
 ### 6.4 HTML outcomes
 
