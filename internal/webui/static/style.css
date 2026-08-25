@@ -1,0 +1,94 @@
+:root {
+  color: #202124;
+  background: #f7f7f5;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.55;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: #185d8f; }
+a:hover { color: #0d3d61; }
+.site-header {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 1rem max(1rem, calc((100% - 880px) / 2));
+  border-bottom: 1px solid #d9d9d4;
+  background: #fff;
+  color: #62645f;
+  font-size: .9rem;
+}
+.brand { color: #202124; font-size: 1.2rem; font-weight: 700; text-decoration: none; }
+main { width: min(880px, calc(100% - 2rem)); margin: 2rem auto 5rem; }
+h1, h2, h3 { line-height: 1.2; }
+h1 { margin: .4rem 0 1rem; font-size: 2rem; }
+h2 { font-size: 1.25rem; }
+h3 { font-size: 1rem; }
+.page-heading, .issue-header, .section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.5rem;
+}
+.page-heading { padding-bottom: 1.5rem; border-bottom: 1px solid #d9d9d4; }
+.page-heading p { margin: 0; color: #62645f; }
+.breadcrumbs { display: flex; gap: .5rem; margin-bottom: 1.5rem; font-size: .9rem; }
+.state-line { display: flex; align-items: center; gap: .7rem; }
+.state {
+  display: inline-block;
+  min-width: 4.2rem;
+  padding: .12rem .45rem;
+  border: 1px solid;
+  border-radius: 4px;
+  font-size: .75rem;
+  font-weight: 700;
+  text-align: center;
+  text-transform: uppercase;
+}
+.state-open { color: #17633a; background: #e9f6ed; border-color: #91c9a3; }
+.state-closed { color: #675014; background: #f8f0d8; border-color: #d2bd75; }
+.issue-id { color: #777973; font-family: ui-monospace, monospace; font-size: .8rem; }
+.issue-tree, .issue-tree ul { padding-left: 1.35rem; }
+.issue-tree > li { margin-block: .85rem; }
+.issue-tree li { padding-left: .3rem; }
+.issue-tree .state, .children .state { margin-right: .6rem; }
+.timestamps { display: flex; flex-wrap: wrap; gap: 1.5rem; color: #62645f; font-size: .82rem; }
+.timestamps div { display: flex; gap: .4rem; }
+.timestamps dt { font-weight: 700; }
+.timestamps dd { margin: 0; }
+.description { margin: 2rem 0; padding: 1rem 0; border-block: 1px solid #d9d9d4; }
+.markdown pre { overflow-x: auto; padding: .8rem; background: #ecece8; }
+.markdown code { padding: .1rem .25rem; background: #ecece8; }
+.markdown pre code { padding: 0; }
+.markdown img { max-width: 100%; }
+.children { padding-left: 1.2rem; }
+.children li { margin-block: .55rem; }
+.action-panel { margin: 1rem 0; }
+.action-panel > summary, .comment-edit > summary { cursor: pointer; color: #185d8f; font-weight: 650; }
+form { display: grid; gap: .8rem; }
+.action-panel form, .new-comment { margin-top: 1rem; padding: 1rem; border: 1px solid #d9d9d4; background: #fff; }
+label { display: grid; gap: .3rem; font-size: .85rem; font-weight: 650; }
+input, textarea, button { font: inherit; letter-spacing: 0; }
+input, textarea { width: 100%; padding: .55rem .65rem; border: 1px solid #aaaDA7; border-radius: 3px; background: #fff; }
+textarea { resize: vertical; }
+button { width: max-content; padding: .5rem .8rem; border: 1px solid #185d8f; border-radius: 4px; background: #185d8f; color: #fff; cursor: pointer; }
+button.secondary { background: #fff; color: #185d8f; }
+.comments { display: grid; gap: 1rem; }
+.comment { padding: 1rem; border: 1px solid #d9d9d4; background: #fff; }
+.comment > header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .5rem; padding-bottom: .7rem; border-bottom: 1px solid #ecece8; }
+.comment > header span { color: #62645f; font-size: .78rem; }
+.comment-edit { margin-top: .8rem; }
+.new-comment { margin-top: 1.5rem; }
+.new-comment h3 { margin: 0; }
+.empty { color: #777973; font-style: italic; }
+.error-page { max-width: 620px; padding-top: 3rem; }
+.error-code { color: #9c2d24; font-weight: 700; text-transform: uppercase; }
+
+@media (max-width: 620px) {
+  .site-header span { display: none; }
+  main { margin-top: 1.25rem; }
+  .page-heading, .issue-header { display: grid; }
+  .issue-id { overflow-wrap: anywhere; }
+  .timestamps { display: grid; gap: .25rem; }
+}

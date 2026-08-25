@@ -1,9 +1,9 @@
 // Package service is the single application service. It owns every v0 issue
 // and comment operation and maps each one to exactly one Git commit.
 //
-// REST and MCP will be thin adapters over this package; there is no separate
-// REST semantic and MCP semantic. No generic filesystem or Git operation is
-// exposed through it.
+// REST, MCP and the browser UI are thin adapters over this package; there is
+// no adapter-specific issue or comment semantic. No generic filesystem or Git
+// operation is exposed through it.
 package service
 
 import (

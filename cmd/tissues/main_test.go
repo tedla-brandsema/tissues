@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os/exec"
 	"strings"
 	"testing"
@@ -126,9 +127,9 @@ func TestServeAcceptsEmptyRepository(t *testing.T) {
 	}
 }
 
-// serverHandler must expose both adapters over the exact same service
-// pointer. This proves cross-transport visibility in both directions.
-func TestServerHandlerSharesServiceBetweenRESTAndMCP(t *testing.T) {
+// serverHandler must expose all three adapters over the exact same service
+// pointer. This proves cross-transport visibility in every direction.
+func TestServerHandlerSharesServiceBetweenWebRESTAndMCP(t *testing.T) {
 	dir := t.TempDir()
 	for _, args := range [][]string{
 		{"init", "-b", "main"},
@@ -149,10 +150,16 @@ func TestServerHandlerSharesServiceBetweenRESTAndMCP(t *testing.T) {
 	httpServer := httptest.NewServer(serverHandler(svc))
 	defer httpServer.Close()
 
-	created := requestJSON(t, httpServer.Client(), http.MethodPost, httpServer.URL+"/api/issues", `{"title":"Created through REST"}`)
-	issueID, _ := created["id"].(string)
-	if issueID == "" {
-		t.Fatalf("REST create result = %v", created)
+	location := requestBrowserForm(t, httpServer.Client(), httpServer.URL, "/issues", url.Values{
+		"title": {"Created through browser"}, "description": {"Initial browser description."},
+	})
+	issueID := strings.TrimPrefix(location, "/issues/")
+	if len(issueID) != 26 {
+		t.Fatalf("browser create Location = %q", location)
+	}
+	restIssue := requestJSON(t, httpServer.Client(), http.MethodGet, httpServer.URL+"/api/issues/"+issueID, "")
+	if restIssue["title"] != "Created through browser" {
+		t.Fatalf("REST did not see browser issue: %v", restIssue)
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "parity-test", Version: "v0"}, nil)
@@ -167,28 +174,72 @@ func TestServerHandlerSharesServiceBetweenRESTAndMCP(t *testing.T) {
 	defer session.Close()
 
 	got := callToolJSON(t, session, "get_issue", map[string]any{"id": issueID})
-	if got["title"] != "Created through REST" {
-		t.Fatalf("MCP did not see REST issue: %v", got)
+	if got["title"] != "Created through browser" {
+		t.Fatalf("MCP did not see browser issue: %v", got)
 	}
 	callToolJSON(t, session, "add_comment", map[string]any{
-		"issue_id": issueID, "author": "agent", "body": "Visible to humans.",
+		"issue_id": issueID, "author": "agent", "body": "Visible in the browser.",
 	})
-	restIssue := requestJSON(t, httpServer.Client(), http.MethodGet, httpServer.URL+"/api/issues/"+issueID, "")
-	comments, _ := restIssue["comments"].([]any)
-	if len(comments) != 1 || comments[0].(map[string]any)["body"] != "Visible to humans." {
-		t.Fatalf("REST did not see MCP comment: %v", restIssue)
+	page, err := httpServer.Client().Get(httpServer.URL + "/issues/" + issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageBody, err := io.ReadAll(page.Body)
+	page.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.StatusCode != http.StatusOK || !strings.Contains(string(pageBody), "Visible in the browser.") {
+		t.Fatalf("browser did not see MCP comment: status %d\n%s", page.StatusCode, pageBody)
 	}
 
-	callToolJSON(t, session, "close_issue", map[string]any{"id": issueID})
+	requestBrowserForm(t, httpServer.Client(), httpServer.URL, "/issues/"+issueID+"/close", url.Values{})
 	restIssue = requestJSON(t, httpServer.Client(), http.MethodGet, httpServer.URL+"/api/issues/"+issueID, "")
 	if restIssue["state"] != "closed" {
-		t.Fatalf("REST did not see MCP close: %v", restIssue)
+		t.Fatalf("REST did not see browser close: %v", restIssue)
 	}
 	requestJSON(t, httpServer.Client(), http.MethodPut, httpServer.URL+"/api/issues/"+issueID, `{"description":"Refined through REST."}`)
 	got = callToolJSON(t, session, "get_issue", map[string]any{"id": issueID})
 	if got["description"] != "Refined through REST." || got["state"] != "closed" {
 		t.Fatalf("MCP did not see final REST mutation: %v", got)
 	}
+	page, err = httpServer.Client().Get(httpServer.URL + "/issues/" + issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageBody, err = io.ReadAll(page.Body)
+	page.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(pageBody), "Refined through REST.") {
+		t.Fatalf("browser did not see REST update:\n%s", pageBody)
+	}
+}
+
+func requestBrowserForm(t *testing.T, client *http.Client, origin, path string, values url.Values) string {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, origin+path, strings.NewReader(values.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", origin)
+	noRedirect := *client
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := noRedirect.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("POST %s: status %d: %s", path, resp.StatusCode, body)
+	}
+	return resp.Header.Get("Location")
 }
 
 func requestJSON(t *testing.T, client *http.Client, method, url, body string) map[string]any {

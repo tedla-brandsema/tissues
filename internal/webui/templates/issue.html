@@ -1,0 +1,69 @@
+{{define "issue.html"}}{{template "header" .Title}}
+<nav class="breadcrumbs"><a href="/">Issues</a>{{if .ParentID}}<span>/</span><a href="/issues/{{.ParentID}}">Parent issue</a>{{end}}</nav>
+<article>
+  <header class="issue-header">
+    <div>
+      <div class="state-line"><span class="state state-{{.State}}">{{.State}}</span><span class="issue-id">{{.ID}}</span></div>
+      <h1>{{.Title}}</h1>
+      <dl class="timestamps"><div><dt>Created</dt><dd>{{.Created}}</dd></div><div><dt>Updated</dt><dd>{{.Updated}}</dd></div></dl>
+    </div>
+    {{if eq .State "open"}}
+    <form method="post" action="/issues/{{.ID}}/close"><button class="secondary" type="submit">Close</button></form>
+    {{else}}
+    <form method="post" action="/issues/{{.ID}}/reopen"><button class="secondary" type="submit">Reopen</button></form>
+    {{end}}
+  </header>
+
+  <section class="markdown description">{{if .Description}}{{.Description}}{{else}}<p class="empty">No description.</p>{{end}}</section>
+
+  <details class="action-panel">
+    <summary>Edit issue</summary>
+    <form method="post" action="/issues/{{.ID}}/update">
+      <label>Title<input name="title" value="{{.Title}}" required></label>
+      <label>Description<textarea name="description" rows="8">{{.Source}}</textarea></label>
+      <button type="submit">Save changes</button>
+    </form>
+  </details>
+
+  <section>
+    <div class="section-heading"><h2>Child issues</h2></div>
+    {{if .Children}}
+    <ul class="children">{{range .Children}}<li><span class="state state-{{.State}}">{{.State}}</span><a href="/issues/{{.ID}}">{{.Title}}</a></li>{{end}}</ul>
+    {{else}}<p class="empty">No child issues.</p>{{end}}
+    <details class="action-panel">
+      <summary>New child issue</summary>
+      <form method="post" action="/issues">
+        <input type="hidden" name="parent_id" value="{{.ID}}">
+        <label>Title<input name="title" required></label>
+        <label>Description<textarea name="description" rows="6" placeholder="Markdown"></textarea></label>
+        <button type="submit">Create child</button>
+      </form>
+    </details>
+  </section>
+
+  <section>
+    <div class="section-heading"><h2>Comments</h2><span>{{len .Comments}}</span></div>
+    <div class="comments">
+      {{range .Comments}}
+      <article class="comment" id="comment-{{.ID}}">
+        <header><strong>{{.Author}}</strong><span>Created {{.Created}}{{if .ShowUpdated}} · Updated {{.Updated}}{{end}}</span></header>
+        <div class="markdown">{{.Body}}</div>
+        <details class="comment-edit">
+          <summary>Edit comment</summary>
+          <form method="post" action="/issues/{{$.ID}}/comments/{{.ID}}/edit">
+            <label>Body<textarea name="body" rows="6" required>{{.Source}}</textarea></label>
+            <button type="submit">Save comment</button>
+          </form>
+        </details>
+      </article>
+      {{else}}<p class="empty">No comments.</p>{{end}}
+    </div>
+    <form class="new-comment" method="post" action="/issues/{{.ID}}/comments">
+      <h3>Add comment</h3>
+      <label>Author<input name="author" required></label>
+      <label>Comment<textarea name="body" rows="6" required placeholder="Markdown"></textarea></label>
+      <button type="submit">Add comment</button>
+    </form>
+  </section>
+</article>
+{{template "footer" .}}{{end}}

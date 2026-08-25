@@ -418,9 +418,9 @@ persistence.
 ## 3. Interface/application semantics
 
 One application service owns every issue and comment operation. Adapters over
-it are thin transports that own no domain semantics of their own. REST, MCP
-and the `tissues serve` command are implemented (§4, §5). **HTML rendering and
-any browser interface are not implemented.**
+it are thin transports that own no domain semantics of their own. REST, MCP,
+the server-rendered browser UI and the `tissues serve` command are implemented
+(§4, §5, §6).
 
 ### 3.1 The service
 
@@ -708,11 +708,11 @@ introduces no third Git behaviour.
 
 At startup the command constructs one service, which verifies the directory
 is a Git working tree, and then reads and validates the entire issue tree once
-before listening. The same service pointer backs REST at `/api/` and MCP at
-`/mcp`, so both transports share one mutex and one transaction sequence. A
-repository that is not valid Git, or that holds invalid tissues content,
-fails at startup rather than on the first request. A repository with no
-`issues/` directory is valid and starts normally.
+before listening. The same service pointer backs the browser UI at `/`, REST
+at `/api/` and MCP at `/mcp`, so all three adapters share one mutex and one
+transaction sequence. A repository that is not valid Git, or that holds
+invalid tissues content, fails at startup rather than on the first request. A
+repository with no `issues/` directory is valid and starts normally.
 
 tissues never initializes a repository, creates one, or configures a remote.
 Those stay ordinary Git responsibilities.
@@ -778,3 +778,84 @@ MCP has no authentication or authorization. The loopback listener default is
 therefore load-bearing. REST and MCP use the same process Git credentials;
 exposing either interface directly to an untrusted network is unsupported and
 unsafe.
+
+---
+
+## 6. Browser interface
+
+`internal/webui` is a third thin adapter over the same `*service.Service` used
+by REST and MCP. It uses embedded `html/template` templates and CSS, and emits
+server-rendered HTML without JavaScript or client-side state.
+
+### 6.1 Routes
+
+```
+GET  /                                             complete recursive hierarchy
+GET  /issues/{id}                                 issue detail
+POST /issues                                      create a root or child issue
+POST /issues/{id}/update                          update title and description
+POST /issues/{id}/close                           close
+POST /issues/{id}/reopen                          reopen
+POST /issues/{id}/comments                        add a comment
+POST /issues/{id}/comments/{commentID}/edit       edit a comment body
+GET  /assets/style.css                            embedded stylesheet
+```
+
+Forms use `application/x-www-form-urlencoded` and expose only caller-owned
+fields. Successful mutations, including no-ops, return `303 See Other` to the
+created or changed issue; comment redirects include the comment fragment.
+
+The index renders the service-provided hierarchy without reordering it. Issue
+pages show state and timestamps, rendered descriptions, child links, comments
+in canonical order, and the meaningful close or reopen action. Raw Markdown
+source is retained in edit textareas. IDs remain URL and secondary metadata,
+not the primary issue label.
+
+### 6.2 Markdown and template safety
+
+Descriptions and comment bodies are rendered with Goldmark v1.8.5 using its
+default CommonMark behavior and default safe HTML renderer. Raw HTML is not
+enabled, dangerous link destinations are not emitted, and
+`html.WithUnsafe` is never used. Only output produced by that safe renderer is
+converted to `template.HTML`; titles, authors, IDs, form values and error text
+remain ordinary escaped template values.
+
+### 6.3 Mutation origin guard
+
+Every browser `POST` requires an `Origin` header whose `http` or `https`
+scheme matches the request, whose host equals the request host, and whose
+hostname is `localhost` or a loopback IP. Missing, null, malformed, foreign
+and non-loopback origins receive a `403` HTML error and never reach the
+service. This protects the loopback form surface from hostile cross-origin
+webpages; it is not authentication and does not alter the unsupported status
+of remote exposure.
+
+HTML responses set a fixed policy containing `default-src 'self'`,
+`script-src 'none'`, `object-src 'none'`, `base-uri 'none'`,
+`form-action 'self'`, and `frame-ancestors 'none'`. They also set
+`X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
+
+### 6.4 HTML outcomes
+
+Browser errors are concise HTML pages. Service outcomes map as follows:
+
+| Outcome | Status |
+|---|---|
+| invalid request | 400 |
+| not found | 404 |
+| repository unusable | 409 |
+| written but not committed | 500 |
+| unknown | 500 |
+| committed locally but not pushed | 502 |
+
+For `not_pushed`, the page states that the mutation is committed locally,
+publication failed, and the form must not be submitted again. It links to the
+resulting or target issue and leaves the local commit intact for ordinary Git
+repair or publication by a later successful mutation.
+
+### 6.5 Security boundary
+
+The browser UI has no authentication, authorization, session, cookie or user
+concept. It shares the loopback listener and process Git credentials with REST
+and MCP. Browser forms have the additional origin guard above; the server as a
+whole must still not be exposed directly to an untrusted network.

@@ -5,9 +5,9 @@ humans and agents.
 
 Issues and comments are ordinary Markdown files in an ordinary Git
 repository. tissues adds only the things Git does not: immutable IDs, domain
-timestamps, open/closed state, containment, comment ordering, and REST and MCP
-interfaces over all of it. Git keeps the history, the replication and the
-remotes.
+timestamps, open/closed state, containment, comment ordering, and browser,
+REST and MCP interfaces over all of it. Git keeps the history, the replication
+and the remotes.
 
 ## Build
 
@@ -68,6 +68,13 @@ Every change requires a clean working tree and index. tissues will refuse to
 run while you have unrelated uncommitted work in that repository, so it can
 never sweep your changes into its commits.
 
+## Browser
+
+Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) after starting the
+server. The server-rendered interface uses the same issues and service as REST
+and MCP, requires no JavaScript, safely renders Markdown, and supports the
+ordinary issue and comment lifecycle operations.
+
 ## REST
 
 ```bash
@@ -116,10 +123,13 @@ mutation exists locally and must not be blindly repeated.
 
 ## Safety
 
-**v0 has no HTTP authentication.** This applies to REST and MCP. The default
-listener is loopback-only. Do not expose it directly to an untrusted network:
-anyone who can reach the port can create, edit and close issues, and can cause
-the process to push to your Git remote with its credentials.
+**v0 has no HTTP authentication.** This applies to the browser UI, REST and
+MCP. The default listener is loopback-only. Browser mutation forms additionally
+require a same-origin loopback `Origin`; this prevents a foreign webpage from
+submitting an ordinary form to a local tissues process, but it is not
+authentication. Do not expose the server directly to an untrusted network:
+anyone who can reach the port can create, edit and close issues through REST or
+MCP, and can cause the process to push to your Git remote with its credentials.
 
 ## Canonical storage
 
@@ -150,5 +160,5 @@ are the state.
 
 ## Not implemented in v0
 
-A browser UI does not exist yet. Neither does authentication, assignment,
-labels, priorities, queues, workflow, or search.
+There is no authentication, assignment, labels, priorities, queues, workflow,
+or search.

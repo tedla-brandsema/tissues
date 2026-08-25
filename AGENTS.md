@@ -13,8 +13,8 @@ Markdown files in an ordinary Git repository. Humans and agents share it.
 Layering, top to bottom:
 
 ```
-REST (human/software clients)   MCP (agents)
-                  \             /
+REST (software clients)   browser UI (humans)   MCP (agents)
+                  \              |              /
                    service layer          <- owns all issue/comment semantics
                           |
               Markdown repository layer   <- internal/store
@@ -71,6 +71,8 @@ Do not commit or push unless the task explicitly asks for it.
 - `internal/mcpserver` — the MCP transport adapter. Its eight tools map
   directly to service operations; MCP representations and schema concerns
   stay here, and domain semantics stay in `internal/service`.
+- `internal/webui` — the server-rendered browser adapter. Templates, safe
+  Markdown rendering, form transport concerns and browser security stay here.
 - `cmd/tissues` — the `tissues serve` executable. Flags only; it adds no Git
   or domain behaviour of its own.
 
@@ -81,8 +83,10 @@ Two rules in the service are load-bearing, not stylistic:
   identical to a running one.
 - Every mutation requires a clean working tree and index, and stages exact
   paths. `git add .` must never appear.
-- REST and MCP in one served repository must share the same
-  `*service.Service`; never construct per-adapter services with separate
-  mutexes.
+- REST, MCP and the web UI in one served repository must share the same
+  `*service.Service`; never construct per-adapter services with separate mutexes.
+- Only output from Goldmark's default safe renderer may become `template.HTML`;
+  never enable `html.WithUnsafe` or trust arbitrary strings as HTML.
+- Browser mutation forms require a same-origin loopback `Origin`.
 - The HTTP listener defaults to loopback. v0 has no authentication and the
   process may hold Git push credentials, so do not change that default.
