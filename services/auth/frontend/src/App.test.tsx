@@ -1,5 +1,4 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type { LoginBootstrap } from "./bootstrap";
@@ -25,15 +24,31 @@ describe("auth login", () => {
     expect(container.querySelector('input[name="next_sig"]')).toHaveValue(bootstrap.nextSig);
   });
 
-  it("enters a disabled loading state without persisting credentials", async () => {
+  it("keeps credentials and exact-return fields successful during native submission", () => {
     const storage = vi.spyOn(Storage.prototype, "setItem");
     const { container } = render(<App bootstrap={bootstrap} />);
-    await userEvent.type(screen.getByLabelText("Email"), "person@example.test");
-    await userEvent.type(screen.getByLabelText("Password"), "not-a-real-password");
+    const email = container.querySelector<HTMLInputElement>("#email")!;
+    const password = container.querySelector<HTMLInputElement>("#password")!;
+    const form = container.querySelector("form")!;
+    let submitted: FormData | undefined;
+    document.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitted = new window.FormData(form);
+    }, { once: true });
+    email.value = "person@example.test";
+    password.value = "not-a-real-password";
 
-    fireEvent.submit(container.querySelector("form")!);
+    fireEvent.submit(form);
 
-    expect(screen.getByRole("button", { name: "Signing in…" })).toBeDisabled();
+    expect(email).not.toBeDisabled();
+    expect(password).not.toBeDisabled();
+    expect(Object.fromEntries(submitted!)).toEqual({
+      email: "person@example.test",
+      password: "not-a-real-password",
+      next: bootstrap.next,
+      next_exp: bootstrap.nextExp,
+      next_sig: bootstrap.nextSig,
+    });
     expect(storage).not.toHaveBeenCalled();
     storage.mockRestore();
   });
