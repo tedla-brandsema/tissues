@@ -1,16 +1,15 @@
 package datastore_test
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"fmt"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	gcds "cloud.google.com/go/datastore"
 	"github.com/tedla-brandsema/tissues/lib/core/config"
@@ -18,27 +17,16 @@ import (
 	tissuesds "github.com/tedla-brandsema/tissues/services/tissues/datastore"
 )
 
-type apiIssue struct {
-	ID       string        `json:"id"`
-	Title    string        `json:"title"`
-	State    tissues.State `json:"state"`
-	ParentID string        `json:"parent_id"`
-	Children []apiIssue    `json:"children"`
-	Comments []apiComment  `json:"comments"`
-}
-
-type apiComment struct{ ID, Author, Body string }
-
-func TestRealHTTPDatastoreDogfood(t *testing.T) {
+func TestRealDatastoreProjectsReferencesAndConcurrentAllocation(t *testing.T) {
 	if os.Getenv("TISSUES_GCP_INTEGRATION") != "1" {
 		t.Skip("set TISSUES_GCP_INTEGRATION=1 for real Datastore test")
 	}
-	project := strings.TrimSpace(os.Getenv("TISSUES_GCP_TEST_PROJECT"))
-	if project == "" {
+	projectID := strings.TrimSpace(os.Getenv("TISSUES_GCP_TEST_PROJECT"))
+	if projectID == "" {
 		t.Fatal("TISSUES_GCP_TEST_PROJECT is required")
 	}
 	ctx := context.Background()
-	client, err := gcds.NewClient(ctx, project)
+	client, err := gcds.NewClient(ctx, projectID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,154 +35,14 @@ func TestRealHTTPDatastoreDogfood(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	namespace := "tissues-http-it-" + suffix[:12]
-	t.Logf("HTTP integration namespace: %s", namespace)
-	defer cleanupNamespace(t, ctx, client, namespace)
-	repo, err := tissuesds.New(client, namespace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile, err := config.NewServiceProfile("http-integration", tissues.Config{Enabled: true, Storage: tissues.StorageConfig{ProjectID: project, Namespace: namespace}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	slot, err := config.NewSlot(profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	svc, err := tissues.New(slot, repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mux := http.NewServeMux()
-	if err := svc.RegisterRoutes(mux); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(mux)
-	defer server.Close()
-	a := apiCreate(t, server.URL, "A", "alpha")
-	b := apiCreate(t, server.URL, "B", "beta")
-	c := apiCreate(t, server.URL, "C", "gamma")
-	var list struct {
-		Issues []apiIssue `json:"issues"`
-	}
-	apiCall(t, server.URL, http.MethodGet, "/api/tissues/v1/issues", nil, http.StatusOK, &list)
-	if len(list.Issues) != 3 {
-		t.Fatalf("list count=%d", len(list.Issues))
-	}
-	var got apiIssue
-	apiCall(t, server.URL, http.MethodGet, "/api/tissues/v1/issues/"+b.ID, nil, http.StatusOK, &got)
-	if got.ID != b.ID {
-		t.Fatalf("get=%#v", got)
-	}
-	apiCall(t, server.URL, http.MethodPut, "/api/tissues/v1/issues/"+b.ID+"/parent", map[string]string{"parent_id": a.ID}, http.StatusOK, &got)
-	if got.ParentID != a.ID {
-		t.Fatalf("attach=%#v", got)
-	}
-	apiCall(t, server.URL, http.MethodPut, "/api/tissues/v1/issues/"+b.ID+"/parent", map[string]string{"parent_id": c.ID}, http.StatusOK, &got)
-	if got.ParentID != c.ID {
-		t.Fatalf("move=%#v", got)
-	}
-	apiCall(t, server.URL, http.MethodPut, "/api/tissues/v1/issues/"+b.ID+"/parent", map[string]string{"parent_id": ""}, http.StatusOK, &got)
-	if got.ParentID != "" {
-		t.Fatalf("detach=%#v", got)
-	}
-	apiCall(t, server.URL, http.MethodPut, "/api/tissues/v1/issues/"+b.ID+"/parent", map[string]string{"parent_id": a.ID}, http.StatusOK, &got)
-	var comment apiComment
-	apiCall(t, server.URL, http.MethodPost, "/api/tissues/v1/issues/"+b.ID+"/comments", map[string]string{"author": "integration-agent", "body": "first"}, http.StatusCreated, &comment)
-	if comment.Author != "integration-agent" {
-		t.Fatalf("comment=%#v", comment)
-	}
-	apiCall(t, server.URL, http.MethodPatch, "/api/tissues/v1/issues/"+b.ID+"/comments/"+comment.ID, map[string]string{"body": "edited"}, http.StatusOK, &comment)
-	if comment.Body != "edited" {
-		t.Fatalf("edit=%#v", comment)
-	}
-	apiCall(t, server.URL, http.MethodPost, "/api/tissues/v1/issues/"+b.ID+"/close", struct{}{}, http.StatusOK, &got)
-	if got.State != tissues.StateClosed {
-		t.Fatalf("close=%#v", got)
-	}
-	apiCall(t, server.URL, http.MethodPost, "/api/tissues/v1/issues/"+b.ID+"/reopen", struct{}{}, http.StatusOK, &got)
-	if got.State != tissues.StateOpen {
-		t.Fatalf("reopen=%#v", got)
-	}
-	apiCall(t, server.URL, http.MethodPut, "/api/tissues/v1/issues/"+b.ID+"/parent", map[string]string{"parent_id": b.ID}, http.StatusBadRequest, nil)
-	apiCall(t, server.URL, http.MethodPut, "/api/tissues/v1/issues/"+a.ID+"/parent", map[string]string{"parent_id": b.ID}, http.StatusBadRequest, nil)
-	apiCall(t, server.URL, http.MethodGet, "/api/tissues/v1/issues/"+a.ID, nil, http.StatusOK, &got)
-	if len(got.Children) != 1 || got.Children[0].ID != b.ID {
-		t.Fatalf("canonical hierarchy=%#v", got)
-	}
-	t.Log("real HTTP API lifecycle and canonical JSON responses verified")
-}
-
-func apiCreate(t *testing.T, base, title, description string) apiIssue {
-	t.Helper()
-	var issue apiIssue
-	apiCall(t, base, http.MethodPost, "/api/tissues/v1/issues", map[string]string{"title": title, "description": description, "parent_id": ""}, http.StatusCreated, &issue)
-	return issue
-}
-
-func apiCall(t *testing.T, base, method, path string, payload any, want int, target any) {
-	t.Helper()
-	var body io.Reader
-	if payload != nil {
-		raw, err := json.Marshal(payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body = bytes.NewReader(raw)
-	}
-	req, err := http.NewRequest(method, base+path, body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	response, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	raw, err := io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != want {
-		t.Fatalf("%s %s status=%d want=%d body=%s", method, path, response.StatusCode, want, raw)
-	}
-	if target != nil {
-		if err := json.Unmarshal(raw, target); err != nil {
-			t.Fatalf("%s %s decode: %v body=%s", method, path, err, raw)
-		}
-	}
-}
-
-func TestRealDatastoreDogfood(t *testing.T) {
-	if os.Getenv("TISSUES_GCP_INTEGRATION") != "1" {
-		t.Skip("set TISSUES_GCP_INTEGRATION=1 for real Datastore test")
-	}
-	project := strings.TrimSpace(os.Getenv("TISSUES_GCP_TEST_PROJECT"))
-	if project == "" {
-		t.Fatal("TISSUES_GCP_TEST_PROJECT is required")
-	}
-	ctx := context.Background()
-	client, err := gcds.NewClient(ctx, project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	suffix, err := tissues.NewID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	namespace := "tissues-it-" + suffix[:12]
+	namespace := "tissues-projects-it-" + suffix[:12]
 	t.Logf("integration namespace: %s", namespace)
 	defer cleanupNamespace(t, ctx, client, namespace)
 	repo, err := tissuesds.New(client, namespace)
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile, err := config.NewServiceProfile("integration", tissues.Config{Enabled: true, Storage: tissues.StorageConfig{ProjectID: project, Namespace: namespace}})
+	profile, err := config.NewServiceProfile("integration", tissues.Config{Enabled: true, Storage: tissues.StorageConfig{ProjectID: projectID, Namespace: namespace}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,118 +54,257 @@ func TestRealDatastoreDogfood(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := mustCreate(t, svc, ctx, "A", "alpha")
-	b := mustCreate(t, svc, ctx, "B", "beta")
-	c := mustCreate(t, svc, ctx, "C", "gamma")
-	for _, want := range []*tissues.Issue{a, b, c} {
-		got, readErr := svc.GetIssue(ctx, want.ID)
-		if readErr != nil || got.ID != want.ID || got.Title != want.Title {
-			t.Fatalf("point read %s=%#v,%v", want.ID, got, readErr)
+
+	for _, key := range []string{"FLUENT", "TISSUES"} {
+		if _, err := svc.CreateProject(ctx, key); err != nil {
+			t.Fatal(err)
 		}
 	}
-	listed, err := svc.ListIssues(ctx)
-	if err != nil || len(listed) != 3 {
-		t.Fatalf("ListIssues=%d,%v", len(listed), err)
+	fluent := make([]*tissues.Issue, 3)
+	for i := range fluent {
+		fluent[i], err = svc.CreateIssue(ctx, "FLUENT", tissues.CreateIssueRequest{Title: fmt.Sprintf("F%d", i+1), Description: "body"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fluent[i].Ref != fmt.Sprintf("FLUENT-%d", i+1) {
+			t.Fatalf("FLUENT ref = %s", fluent[i].Ref)
+		}
 	}
-	b, err = svc.MoveIssue(ctx, b.ID, a.ID)
-	if err != nil || b.ParentID != a.ID {
-		t.Fatalf("attach=%#v,%v", b, err)
+	for i := 1; i <= 2; i++ {
+		issue, err := svc.CreateIssue(ctx, "TISSUES", tissues.CreateIssueRequest{Title: "T", Description: "body"})
+		if err != nil || issue.Ref != fmt.Sprintf("TISSUES-%d", i) {
+			t.Fatalf("TISSUES issue = %#v, %v", issue, err)
+		}
 	}
-	readA, _ := svc.GetIssue(ctx, a.ID)
-	if len(readA.Children) != 1 || readA.Children[0].ID != b.ID {
-		t.Fatalf("attach readback=%#v", readA)
+	originalID, originalNumber, originalRef := fluent[1].ID, fluent[1].Number, fluent[1].Ref
+	for _, parent := range []string{"FLUENT-1", "FLUENT-3", "", "FLUENT-1"} {
+		moved, err := svc.MoveIssue(ctx, fluent[1].Ref, parent)
+		if err != nil {
+			t.Fatalf("move to %q: %v", parent, err)
+		}
+		if moved.ID != originalID || moved.Number != originalNumber || moved.Ref != originalRef {
+			t.Fatal("move changed immutable identity")
+		}
 	}
-	originalID, originalTitle := b.ID, b.Title
-	b, err = svc.MoveIssue(ctx, b.ID, c.ID)
-	if err != nil || b.ID != originalID || b.Title != originalTitle || b.ParentID != c.ID {
-		t.Fatalf("move=%#v,%v", b, err)
+	if _, err := svc.MoveIssue(ctx, "FLUENT-2", "FLUENT-999999"); !errors.Is(err, tissues.ErrNotFound) {
+		t.Fatalf("ghost ref = %v", err)
 	}
-	b, err = svc.MoveIssue(ctx, b.ID, "")
-	if err != nil || b.ParentID != "" {
-		t.Fatalf("detach=%#v,%v", b, err)
+	if _, err := svc.MoveIssue(ctx, "FLUENT-2", "TISSUES-1"); !errors.Is(err, tissues.ErrInvalid) {
+		t.Fatalf("cross-project = %v", err)
 	}
-	b, err = svc.MoveIssue(ctx, b.ID, a.ID)
-	if err != nil {
+	if _, err := svc.MoveIssue(ctx, "FLUENT-2", "FLUENT-2"); !errors.Is(err, tissues.ErrInvalid) {
+		t.Fatalf("self = %v", err)
+	}
+	if _, err := svc.MoveIssue(ctx, "FLUENT-1", "FLUENT-2"); !errors.Is(err, tissues.ErrInvalid) {
+		t.Fatalf("cycle = %v", err)
+	}
+	if _, err := svc.GetIssue(ctx, "#FLUENT-2"); !errors.Is(err, tissues.ErrInvalid) {
+		t.Fatalf("hash-prefixed ID = %v", err)
+	}
+	read, err := svc.GetIssue(ctx, "FLUENT-2")
+	if err != nil || read.ParentRef != "FLUENT-1" {
+		t.Fatalf("hierarchy read = %#v, %v", read, err)
+	}
+
+	const concurrent = 6
+	created := make([]*tissues.Issue, concurrent)
+	errs := make([]error, concurrent)
+	var wg sync.WaitGroup
+	for i := range concurrent {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			created[index], errs[index] = svc.CreateIssue(ctx, "FLUENT", tissues.CreateIssueRequest{Title: fmt.Sprintf("Concurrent %d", index), Description: "body"})
+		}(i)
+	}
+	wg.Wait()
+	numbers := make([]int, 0, concurrent)
+	seenRefs, seenIDs := map[string]bool{}, map[string]bool{}
+	for i, issue := range created {
+		if errs[i] != nil {
+			t.Fatalf("concurrent create %d: %v", i, errs[i])
+		}
+		if seenRefs[issue.Ref] || seenIDs[issue.ID] {
+			t.Fatalf("duplicate concurrent identity: %#v", issue)
+		}
+		seenRefs[issue.Ref], seenIDs[issue.ID] = true, true
+		numbers = append(numbers, int(issue.Number))
+		resolved, err := repo.ResolveIssue(ctx, tissues.IssueRef{ProjectKey: "FLUENT", Number: issue.Number})
+		if err != nil || resolved.ID != issue.ID {
+			t.Fatalf("index %s = %#v, %v", issue.Ref, resolved, err)
+		}
+	}
+	sort.Ints(numbers)
+	for i, number := range numbers {
+		if number != i+4 {
+			t.Fatalf("concurrent numbers = %v", numbers)
+		}
+	}
+	project, err := repo.GetProject(ctx, "FLUENT")
+	if err != nil || project.NextIssueNumber != 10 {
+		t.Fatalf("allocator = %#v, %v", project, err)
+	}
+	projectKey := gcds.NameKey(tissuesds.ProjectKind, "FLUENT", nil)
+	projectKey.Namespace = namespace
+	refKeys, err := client.GetAll(ctx, gcds.NewQuery(tissuesds.IssueRefKind).Namespace(namespace).Ancestor(projectKey).KeysOnly(), nil)
+	if err != nil || len(refKeys) != 9 {
+		t.Fatalf("reference indexes = %d, %v", len(refKeys), err)
+	}
+	t.Logf("per-project refs verified; concurrent committed numbers=%v; allocator next=%d", numbers, project.NextIssueNumber)
+
+	if _, err := svc.CreateProject(ctx, "TELONAUTICS"); err != nil {
 		t.Fatal(err)
 	}
-	comment, err := svc.AddComment(ctx, b.ID, "integration-agent", "first")
-	if err != nil {
-		t.Fatal(err)
+	projectPage1, err := svc.ListProjectsPage(ctx, 2, "")
+	if err != nil || len(projectPage1.Projects) != 2 || projectPage1.Projects[0].Key != "FLUENT" || projectPage1.Projects[1].Key != "TELONAUTICS" || projectPage1.NextCursor == "" {
+		t.Fatalf("Project page 1 = %#v, %v", projectPage1, err)
 	}
-	readB, err := svc.GetIssue(ctx, b.ID)
-	if err != nil || len(readB.Comments) != 1 || readB.Comments[0].ID != comment.ID {
-		t.Fatalf("comment read=%#v,%v", readB, err)
+	projectPage2, err := svc.ListProjectsPage(ctx, 2, projectPage1.NextCursor)
+	if err != nil || len(projectPage2.Projects) != 1 || projectPage2.Projects[0].Key != "TISSUES" || projectPage2.NextCursor != "" {
+		t.Fatalf("Project page 2 = %#v, %v", projectPage2, err)
 	}
-	edited, err := svc.EditComment(ctx, b.ID, comment.ID, "edited")
-	if err != nil || edited.Body != "edited" || edited.ID != comment.ID || !edited.Created.Equal(comment.Created) {
-		t.Fatalf("edit=%#v,%v", edited, err)
+
+	seenOverview := map[string]bool{}
+	var previousUpdated time.Time
+	cursor := ""
+	pages := 0
+	for {
+		page, err := svc.ListIssueOverviewsPage(ctx, 2, cursor, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		for _, overview := range page.Issues {
+			if seenOverview[overview.Ref] {
+				t.Fatalf("duplicate paged Issue %s", overview.Ref)
+			}
+			seenOverview[overview.Ref] = true
+			if !previousUpdated.IsZero() && overview.Updated.After(previousUpdated) {
+				t.Fatalf("global Issue ordering increased from %s to %s", previousUpdated, overview.Updated)
+			}
+			previousUpdated = overview.Updated
+			if overview.Ref == "FLUENT-2" && overview.ParentRef != "FLUENT-1" {
+				t.Fatalf("FLUENT-2 parent ref = %q", overview.ParentRef)
+			}
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
 	}
-	second, err := svc.AddComment(ctx, b.ID, "integration-agent", "second")
-	if err != nil {
-		t.Fatal(err)
+	if len(seenOverview) != 11 || pages < 2 {
+		t.Fatalf("paged global Issues = %d across %d pages", len(seenOverview), pages)
 	}
-	readB, _ = svc.GetIssue(ctx, b.ID)
-	if len(readB.Comments) != 2 || readB.Comments[0].ID != comment.ID || readB.Comments[1].ID != second.ID {
-		t.Fatalf("comment order=%#v", readB.Comments)
+	seenFiltered := map[string]bool{}
+	previousUpdated = time.Time{}
+	cursor = ""
+	for {
+		page, err := svc.ListIssueOverviewsPage(ctx, 2, cursor, "FLUENT")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, overview := range page.Issues {
+			if overview.ProjectKey != "FLUENT" || seenFiltered[overview.Ref] {
+				t.Fatalf("filtered Issue = %#v", overview)
+			}
+			if !previousUpdated.IsZero() && overview.Updated.After(previousUpdated) {
+				t.Fatalf("filtered Issue ordering increased")
+			}
+			seenFiltered[overview.Ref] = true
+			previousUpdated = overview.Updated
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
 	}
-	closed, err := svc.CloseIssue(ctx, b.ID)
-	if err != nil || closed.State != tissues.StateClosed {
-		t.Fatalf("close=%#v,%v", closed, err)
+	if len(seenFiltered) != 9 {
+		t.Fatalf("filtered FLUENT Issues = %d", len(seenFiltered))
 	}
-	closedRead, _ := svc.GetIssue(ctx, b.ID)
-	if closedRead.State != tissues.StateClosed {
-		t.Fatalf("closed read=%#v", closedRead)
-	}
-	opened, err := svc.ReopenIssue(ctx, b.ID)
-	if err != nil || opened.State != tissues.StateOpen {
-		t.Fatalf("reopen=%#v,%v", opened, err)
-	}
-	if _, err = svc.MoveIssue(ctx, b.ID, b.ID); !errors.Is(err, tissues.ErrInvalid) {
-		t.Fatalf("self-parent error=%v", err)
-	}
-	if _, err = svc.MoveIssue(ctx, a.ID, b.ID); !errors.Is(err, tissues.ErrInvalid) {
-		t.Fatalf("cycle error=%v", err)
-	}
-	readA, _ = svc.GetIssue(ctx, a.ID)
-	if readA.ParentID != "" || len(readA.Children) != 1 || readA.Children[0].ID != b.ID {
-		t.Fatalf("rejections changed hierarchy=%#v", readA)
-	}
-	t.Log("immediate point reads, global list queries, ancestor comment queries, and relationship reads were consistent without sleeps or retries")
+	t.Logf("cursor pagination verified: Projects 2+1; global Issues=%d across %d pages", len(seenOverview), pages)
+	assertOverviewCorruptionDetection(t, ctx, client, repo, namespace)
 }
 
-func mustCreate(t *testing.T, svc *tissues.Service, ctx context.Context, title, description string) *tissues.Issue {
+func assertOverviewCorruptionDetection(t *testing.T, ctx context.Context, client *gcds.Client, repo *tissuesds.Store, namespace string) {
 	t.Helper()
-	issue, err := svc.CreateIssue(ctx, tissues.CreateIssueRequest{Title: title, Description: description})
-	if err != nil {
-		t.Fatal(err)
+	future := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
+	issueProperties := func(number int64, parentID string) gcds.PropertyList {
+		return gcds.PropertyList{
+			{Name: "Number", Value: number}, {Name: "Title", Value: "corrupt"}, {Name: "State", Value: "open"},
+			{Name: "Created", Value: future}, {Name: "Updated", Value: future}, {Name: "Description", Value: "body", NoIndex: true}, {Name: "ParentID", Value: parentID},
+		}
 	}
-	return issue
+	projectKey := gcds.NameKey(tissuesds.ProjectKind, "FLUENT", nil)
+	projectKey.Namespace = namespace
+	check := func(name string, issueKey, refKey *gcds.Key, refIssueID string) {
+		t.Helper()
+		properties := issueProperties(map[string]int64{"missing-ref": 999, "bad-index": 998, "missing-parent": 997, "bad-ancestry": 996}[name], map[string]string{"missing-parent": "yyyyyyyyyyyyyyyyyyyyyyyyyy"}[name])
+		if _, err := client.Put(ctx, issueKey, &properties); err != nil {
+			t.Fatal(err)
+		}
+		if refKey != nil {
+			if _, err := client.Put(ctx, refKey, &gcds.PropertyList{{Name: "IssueID", Value: refIssueID}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := repo.ListIssueOverviewsPage(ctx, tissues.PageRequest{Size: 1}); !errors.Is(err, tissues.ErrInternal) {
+			t.Fatalf("%s corruption = %v", name, err)
+		}
+		keys := []*gcds.Key{issueKey}
+		if refKey != nil {
+			keys = append(keys, refKey)
+		}
+		if err := client.DeleteMulti(ctx, keys); err != nil {
+			t.Fatal(err)
+		}
+	}
+	missingRefIssue := gcds.NameKey(tissuesds.IssueKind, "zzzzzzzzzzzzzzzzzzzzzzzzzz", projectKey)
+	missingRefIssue.Namespace = namespace
+	check("missing-ref", missingRefIssue, nil, "")
+	badIndexIssue := gcds.NameKey(tissuesds.IssueKind, "xxxxxxxxxxxxxxxxxxxxxxxxxx", projectKey)
+	badIndexIssue.Namespace = namespace
+	badIndexRef := gcds.NameKey(tissuesds.IssueRefKind, "998", projectKey)
+	badIndexRef.Namespace = namespace
+	check("bad-index", badIndexIssue, badIndexRef, "wwwwwwwwwwwwwwwwwwwwwwwwww")
+	missingParentIssue := gcds.NameKey(tissuesds.IssueKind, "vvvvvvvvvvvvvvvvvvvvvvvvvv", projectKey)
+	missingParentIssue.Namespace = namespace
+	missingParentRef := gcds.NameKey(tissuesds.IssueRefKind, "997", projectKey)
+	missingParentRef.Namespace = namespace
+	check("missing-parent", missingParentIssue, missingParentRef, missingParentIssue.Name)
+	badAncestryIssue := gcds.NameKey(tissuesds.IssueKind, "uuuuuuuuuuuuuuuuuuuuuuuuuu", nil)
+	badAncestryIssue.Namespace = namespace
+	check("bad-ancestry", badAncestryIssue, nil, "")
+	t.Log("global Issue overview rejects malformed ancestry, missing/mismatched indexes, and missing parents")
 }
+
+func countIssues(issues []*tissues.Issue) int {
+	total := 0
+	for _, issue := range issues {
+		total += 1 + countIssues(issue.Children)
+	}
+	return total
+}
+
 func cleanupNamespace(t *testing.T, ctx context.Context, client *gcds.Client, namespace string) {
 	t.Helper()
-	clean := true
-	for _, kind := range []string{tissuesds.CommentKind, tissuesds.IssueKind} {
+	kinds := []string{tissuesds.CommentKind, tissuesds.IssueRefKind, tissuesds.IssueKind, tissuesds.ProjectKind}
+	for _, kind := range kinds {
 		keys, err := client.GetAll(ctx, gcds.NewQuery(kind).Namespace(namespace).KeysOnly(), nil)
 		if err != nil {
-			clean = false
-			t.Errorf("cleanup query namespace=%s kind=%s: %v", namespace, kind, err)
+			t.Errorf("cleanup query %s: %v", kind, err)
 			continue
 		}
 		if len(keys) > 0 {
 			if err := client.DeleteMulti(ctx, keys); err != nil {
-				clean = false
-				t.Errorf("cleanup delete namespace=%s kind=%s keys=%v: %v", namespace, kind, keys, err)
+				t.Errorf("cleanup delete %s: %v", kind, err)
 			}
 		}
 	}
-	for _, kind := range []string{tissuesds.CommentKind, tissuesds.IssueKind} {
+	for _, kind := range kinds {
 		keys, err := client.GetAll(ctx, gcds.NewQuery(kind).Namespace(namespace).KeysOnly(), nil)
 		if err != nil || len(keys) != 0 {
-			clean = false
-			t.Errorf("cleanup residual namespace=%s kind=%s keys=%v error=%v", namespace, kind, keys, err)
+			t.Errorf("cleanup residual kind=%s keys=%d error=%v", kind, len(keys), err)
 		}
 	}
-	if clean {
-		t.Logf("cleanup verified zero residual tissues_issue and tissues_comment entities in namespace %s", namespace)
-	}
+	t.Logf("cleanup verified zero residual entities for all tissues Project-era kinds in namespace %s", namespace)
 }

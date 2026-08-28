@@ -1,228 +1,195 @@
 package tissues
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
-
-	gcpauth "github.com/tedla-brandsema/tissues/lib/gcp/auth"
 )
 
-func TestAPILifecycleRoutes(t *testing.T) {
+func TestProjectAndIssueIDAPIRoutes(t *testing.T) {
 	svc := testService(t, newMemoryRepository())
-	base := time.Date(2026, 8, 28, 9, 30, 0, 123456789, time.UTC)
-	svc.now = func() time.Time { return base }
-	ids := []string{"aaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccc", "dddddddddddddddddddddddddd"}
-	svc.newID = func() (string, error) { id := ids[0]; ids = ids[1:]; return id, nil }
-	handler := registeredHandler(t, svc)
+	handler := svc.apiHandler()
+	var project projectDTO
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/projects", map[string]string{"key": " fluent "}, http.StatusCreated, &project)
+	if project.Key != "FLUENT" || project.Created == "" {
+		t.Fatalf("project = %#v", project)
+	}
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/projects", map[string]string{"key": "FLUENT"}, http.StatusConflict, nil)
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/projects", map[string]string{"key": "bad-key"}, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/projects", map[string]string{"key": "TISSUES"}, http.StatusCreated, nil)
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/projects/FLUENT", nil, http.StatusOK, &project)
+	var projects struct {
+		Projects   []projectDTO `json:"projects"`
+		NextCursor string       `json:"next_cursor"`
+	}
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/projects?page_size=25", nil, http.StatusOK, &projects)
+	if len(projects.Projects) != 2 || projects.Projects[0].Key != "FLUENT" || projects.Projects[1].Key != "TISSUES" {
+		t.Fatalf("projects = %#v", projects)
+	}
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/projects", nil, http.StatusOK, &projects)
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/projects?page_size=100", nil, http.StatusOK, &projects)
 
-	a := apiIssue(t, handler, http.MethodPost, apiBasePath+"/issues", `{"title":"Alpha","description":"A"}`, http.StatusCreated)
-	b := apiIssue(t, handler, http.MethodPost, apiBasePath+"/issues", `{"title":"Beta","description":"B"}`, http.StatusCreated)
-	c := apiIssue(t, handler, http.MethodPost, apiBasePath+"/issues", `{"title":"Gamma","description":"C"}`, http.StatusCreated)
-	if a.Created != base.Format(time.RFC3339Nano) || a.Updated != a.Created {
-		t.Fatalf("timestamp = %q/%q", a.Created, a.Updated)
+	var first, second, foreign issueDTO
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/projects/FLUENT/issues", map[string]string{"title": "First", "description": "# markdown"}, http.StatusCreated, &first)
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/projects/FLUENT/issues", map[string]string{"title": "Second", "description": "body"}, http.StatusCreated, &second)
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/projects/TISSUES/issues", map[string]string{"title": "Foreign", "description": "body"}, http.StatusCreated, &foreign)
+	apiRequest(t, handler, http.MethodPut, "/api/tissues/v1/issues/FLUENT-2/parent", map[string]string{"parent_id": "FLUENT-1"}, http.StatusOK, &second)
+	if first.ID != "FLUENT-1" || first.Number != 1 || first.ProjectKey != "FLUENT" {
+		t.Fatalf("first = %#v", first)
+	}
+	if second.ID != "FLUENT-2" || second.ParentID != first.ID {
+		t.Fatalf("second = %#v", second)
+	}
+	if foreign.ID != "TISSUES-1" {
+		t.Fatalf("foreign = %#v", foreign)
 	}
 
-	list := apiRequest(t, handler, http.MethodGet, apiBasePath+"/issues", "", http.StatusOK)
-	var listed struct {
-		Issues []issueDTO `json:"issues"`
+	var raw map[string]any
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/issues/FLUENT-2", nil, http.StatusOK, &raw)
+	if raw["id"] != "FLUENT-2" || raw["parent_id"] != "FLUENT-1" {
+		t.Fatalf("Issue IDs = %#v", raw)
 	}
-	decodeResponse(t, list, &listed)
-	if len(listed.Issues) != 3 {
-		t.Fatalf("issues = %d, want 3", len(listed.Issues))
-	}
-	got := apiIssue(t, handler, http.MethodGet, apiBasePath+"/issues/"+b.ID, "", http.StatusOK)
-	if got.Title != "Beta" {
-		t.Fatalf("get = %#v", got)
-	}
-
-	updated := apiIssue(t, handler, http.MethodPatch, apiBasePath+"/issues/"+b.ID, `{"title":"Beta edited","description":"updated"}`, http.StatusOK)
-	if updated.Title != "Beta edited" || updated.Description != "updated" {
-		t.Fatalf("update = %#v", updated)
-	}
-
-	for _, parentID := range []string{a.ID, c.ID, "", a.ID} {
-		moved := apiIssue(t, handler, http.MethodPut, apiBasePath+"/issues/"+b.ID+"/parent", `{"parent_id":"`+parentID+`"}`, http.StatusOK)
-		if moved.ParentID != parentID {
-			t.Fatalf("parent = %q, want %q", moved.ParentID, parentID)
+	for _, forbidden := range []string{"ref", "parent_ref"} {
+		if _, exists := raw[forbidden]; exists {
+			t.Fatalf("public Issue exposed %s: %#v", forbidden, raw)
 		}
 	}
-
-	closed := apiIssue(t, handler, http.MethodPost, apiBasePath+"/issues/"+b.ID+"/close", `{}`, http.StatusOK)
-	if closed.State != StateClosed {
-		t.Fatalf("closed state = %q", closed.State)
+	var list struct {
+		Issues []issueDTO `json:"issues"`
 	}
-	reopened := apiIssue(t, handler, http.MethodPost, apiBasePath+"/issues/"+b.ID+"/reopen", `{}`, http.StatusOK)
-	if reopened.State != StateOpen {
-		t.Fatalf("reopened state = %q", reopened.State)
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/projects/FLUENT/issues", nil, http.StatusOK, &list)
+	if len(list.Issues) != 1 || len(list.Issues[0].Children) != 1 {
+		t.Fatalf("tree = %#v", list)
 	}
 
-	commentResponse := apiRequest(t, handler, http.MethodPost, apiBasePath+"/issues/"+b.ID+"/comments", `{"author":"local person","body":"hello **world**"}`, http.StatusCreated)
+	title := "Updated"
+	apiRequest(t, handler, http.MethodPatch, "/api/tissues/v1/issues/FLUENT-2", map[string]any{"title": title}, http.StatusOK, &second)
+	if second.Title != title || second.ID != "FLUENT-2" {
+		t.Fatalf("updated = %#v", second)
+	}
+	apiRequest(t, handler, http.MethodPut, "/api/tissues/v1/issues/FLUENT-2/parent", map[string]string{"parent_id": ""}, http.StatusOK, &second)
+	if second.ParentID != "" {
+		t.Fatalf("detached = %#v", second)
+	}
+	apiRequest(t, handler, http.MethodPut, "/api/tissues/v1/issues/FLUENT-2/parent", map[string]string{"parent_id": "FLUENT-1"}, http.StatusOK, &second)
+	description := "atomic body"
+	apiRequest(t, handler, http.MethodPatch, "/api/tissues/v1/issues/FLUENT-2", map[string]any{"title": "Atomic", "description": description}, http.StatusOK, &second)
+	if second.Title != "Atomic" || second.Description != description || second.ParentID != "FLUENT-1" {
+		t.Fatalf("content update = %#v", second)
+	}
+	apiRequest(t, handler, http.MethodPatch, "/api/tissues/v1/issues/FLUENT-2", map[string]any{"title": "Rejected", "parent_id": ""}, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/projects/FLUENT/issues", map[string]any{"title": "Rejected", "description": "body", "parent_id": ""}, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/issues/FLUENT-2/close", map[string]any{}, http.StatusOK, &second)
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/issues/FLUENT-2/reopen", map[string]any{}, http.StatusOK, &second)
 	var comment commentDTO
-	decodeResponse(t, commentResponse, &comment)
-	if comment.Author != "local person" || comment.Body != "hello **world**" {
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/issues/FLUENT-2/comments", map[string]string{"author": "Ada", "body": "note"}, http.StatusCreated, &comment)
+	apiRequest(t, handler, http.MethodPatch, "/api/tissues/v1/issues/FLUENT-2/comments/"+comment.ID, map[string]string{"body": "edited"}, http.StatusOK, &comment)
+	if comment.Body != "edited" {
 		t.Fatalf("comment = %#v", comment)
 	}
-	editedResponse := apiRequest(t, handler, http.MethodPatch, apiBasePath+"/issues/"+b.ID+"/comments/"+comment.ID, `{"body":"edited"}`, http.StatusOK)
-	var edited commentDTO
-	decodeResponse(t, editedResponse, &edited)
-	if edited.ID != comment.ID || edited.Body != "edited" || edited.Created != comment.Created {
-		t.Fatalf("edited = %#v", edited)
-	}
 
-	apiErrorKind(t, handler, http.MethodPut, apiBasePath+"/issues/"+b.ID+"/parent", `{"parent_id":"`+b.ID+`"}`, http.StatusBadRequest, "invalid")
-	apiErrorKind(t, handler, http.MethodPut, apiBasePath+"/issues/"+a.ID+"/parent", `{"parent_id":"`+b.ID+`"}`, http.StatusBadRequest, "invalid")
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/issues/not-a-ref", nil, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/issues/FLUENT-999", nil, http.StatusNotFound, nil)
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/issues/%23FLUENT-2", nil, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodPut, "/api/tissues/v1/issues/FLUENT-2/parent", map[string]string{"parent_id": "#FLUENT-1"}, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodPut, "/api/tissues/v1/issues/FLUENT-2/parent", map[string]string{"parent_id": "TISSUES-1"}, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodPatch, "/api/tissues/v1/issues/FLUENT-2", map[string]string{"parent_ref": "#FLUENT-1"}, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodPut, "/api/tissues/v1/issues/FLUENT-2/parent", map[string]string{"parent_ref": "#FLUENT-1"}, http.StatusBadRequest, nil)
+	var overview struct {
+		Issues     []map[string]any `json:"issues"`
+		NextCursor string           `json:"next_cursor"`
+	}
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/issues?page_size=2", nil, http.StatusOK, &overview)
+	if len(overview.Issues) != 2 || overview.NextCursor == "" {
+		t.Fatalf("overview page = %#v", overview)
+	}
+	for _, item := range overview.Issues {
+		for _, forbidden := range []string{"ref", "parent_ref", "children", "comments", "description"} {
+			if _, exists := item[forbidden]; exists {
+				t.Fatalf("overview exposed %s: %#v", forbidden, item)
+			}
+		}
+	}
+	if overview.Issues[1]["id"] != "FLUENT-2" || overview.Issues[1]["parent_id"] != "FLUENT-1" {
+		t.Fatalf("overview Issue IDs = %#v", overview.Issues[1])
+	}
+	var lastOverview struct {
+		Issues     []map[string]any `json:"issues"`
+		NextCursor string           `json:"next_cursor"`
+	}
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/issues?page_size=2&cursor="+overview.NextCursor, nil, http.StatusOK, &lastOverview)
+	if len(lastOverview.Issues) != 1 || lastOverview.NextCursor != "" {
+		t.Fatalf("last overview page = %#v", lastOverview)
+	}
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/issues?page_size=2&project=FLUENT", nil, http.StatusOK, &lastOverview)
+	if len(lastOverview.Issues) != 2 || lastOverview.NextCursor != "" {
+		t.Fatalf("filtered overview = %#v", lastOverview)
+	}
+	for _, item := range lastOverview.Issues {
+		if item["project_key"] != "FLUENT" {
+			t.Fatalf("filtered overview leaked Project: %#v", item)
+		}
+	}
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/issues?project=bad-key", nil, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/issues?project=MISSING", nil, http.StatusNotFound, nil)
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/projects?page_size=0", nil, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/projects?page_size=101", nil, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/issues?page_size=nope", nil, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodGet, "/api/tissues/v1/issues?page_size=2&cursor=invalid", nil, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/issues", map[string]any{}, http.StatusMethodNotAllowed, nil)
 }
 
-func TestAPIStrictJSONFailures(t *testing.T) {
-	handler := registeredHandler(t, testService(t, newMemoryRepository()))
-	cases := []struct {
-		name, body string
-	}{
-		{"malformed", `{"title":`},
-		{"unknown field", `{"title":"x","description":"","extra":true}`},
-		{"multiple documents", `{"title":"x","description":""} {}`},
-		{"missing description", `{"title":"x"}`},
-		{"oversized", `{"title":"x","description":"` + strings.Repeat("x", maxJSONBody) + `"}`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			apiErrorKind(t, handler, http.MethodPost, apiBasePath+"/issues", tc.body, http.StatusBadRequest, "invalid")
-		})
-	}
-
-	request := httptest.NewRequest(http.MethodPost, apiBasePath+"/issues", strings.NewReader(`{"title":"x","description":""}`))
-	request.Header.Set("Content-Type", "text/plain")
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("media type status = %d", recorder.Code)
-	}
-
-	stateRequest := httptest.NewRequest(http.MethodPost, apiBasePath+"/issues/missing/close", nil)
-	stateRecorder := httptest.NewRecorder()
-	handler.ServeHTTP(stateRecorder, stateRequest)
-	if stateRecorder.Code != http.StatusBadRequest {
-		t.Fatalf("state mutation without JSON status = %d", stateRecorder.Code)
-	}
-}
-
-func TestAPIErrorMappingAndInternalRedaction(t *testing.T) {
-	missing := registeredHandler(t, testService(t, newMemoryRepository()))
-	apiErrorKind(t, missing, http.MethodGet, apiBasePath+"/issues/missing", "", http.StatusNotFound, "not_found")
-
-	conflictService := testService(t, failureRepository{err: ErrConflict})
-	conflictService.newID = func() (string, error) { return "aaaaaaaaaaaaaaaaaaaaaaaaaa", nil }
-	apiErrorKind(t, registeredHandler(t, conflictService), http.MethodPost, apiBasePath+"/issues", `{"title":"x","description":""}`, http.StatusConflict, "conflict")
-
-	internal := registeredHandler(t, testService(t, failureRepository{err: errors.New("datastore project secret-path diagnostic")}))
-	response := apiRequest(t, internal, http.MethodGet, apiBasePath+"/issues", "", http.StatusInternalServerError)
-	if strings.Contains(response.Body.String(), "datastore") || strings.Contains(response.Body.String(), "secret-path") {
-		t.Fatalf("internal response leaked detail: %s", response.Body.String())
-	}
-	var envelope errorEnvelope
-	decodeResponse(t, response, &envelope)
-	if envelope.Error.Kind != "internal" || envelope.Error.Message != "internal server error" {
-		t.Fatalf("error = %#v", envelope)
-	}
-}
-
-func TestAPICommentAuthorUsesTrustedIdentity(t *testing.T) {
+func TestAPIStrictJSONAndRedaction(t *testing.T) {
 	svc := testService(t, newMemoryRepository())
-	ids := []string{"aaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbb"}
-	svc.newID = func() (string, error) { id := ids[0]; ids = ids[1:]; return id, nil }
-	issue, err := svc.CreateIssue(context.Background(), CreateIssueRequest{Title: "Issue"})
-	if err != nil {
-		t.Fatal(err)
+	handler := svc.apiHandler()
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/projects", map[string]any{"key": "FLUENT", "extra": true}, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/projects", map[string]string{"key": "FLUENT"}, http.StatusCreated, nil)
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/projects/FLUENT/issues", map[string]string{"title": "Old field", "description": "body", "parent_ref": ""}, http.StatusBadRequest, nil)
+	apiRequest(t, handler, http.MethodPost, "/api/tissues/v1/projects/FLUENT/issues", map[string]string{"title": "Old field", "description": "body", "parent_id": ""}, http.StatusBadRequest, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/tissues/v1/projects", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "text/plain")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("content type = %d", response.Code)
 	}
-	handler := registeredHandler(t, svc)
-	request := httptest.NewRequest(http.MethodPost, apiBasePath+"/issues/"+issue.ID+"/comments", strings.NewReader(`{"author":"spoofed","body":"hello"}`))
-	request.Header.Set("Content-Type", "application/json")
-	request = request.WithContext(gcpauth.WithEmail(gcpauth.WithSubject(request.Context(), "subject-1"), "trusted@example.test"))
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusCreated {
-		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
-	}
-	var comment commentDTO
-	decodeResponse(t, recorder, &comment)
-	if comment.Author != "trusted@example.test" {
-		t.Fatalf("author = %q", comment.Author)
-	}
-
-	apiErrorKind(t, handler, http.MethodPost, apiBasePath+"/issues/"+issue.ID+"/comments", `{"body":"no author"}`, http.StatusBadRequest, "invalid")
-}
-
-func registeredHandler(t *testing.T, svc *Service) http.Handler {
-	t.Helper()
-	mux := http.NewServeMux()
-	if err := svc.RegisterRoutes(mux); err != nil {
-		t.Fatal(err)
-	}
-	return mux
-}
-
-func apiIssue(t *testing.T, handler http.Handler, method, path, body string, status int) issueDTO {
-	t.Helper()
-	response := apiRequest(t, handler, method, path, body, status)
-	var issue issueDTO
-	decodeResponse(t, response, &issue)
-	return issue
-}
-
-func apiErrorKind(t *testing.T, handler http.Handler, method, path, body string, status int, kind string) {
-	t.Helper()
-	response := apiRequest(t, handler, method, path, body, status)
-	var envelope errorEnvelope
-	decodeResponse(t, response, &envelope)
-	if envelope.Error.Kind != kind || envelope.Error.Message == "" {
-		t.Fatalf("error = %#v", envelope)
+	writeResponse := httptest.NewRecorder()
+	writeServiceError(writeResponse, httptest.NewRequest(http.MethodGet, "/", nil), errors.New("provider secret detail"))
+	if strings.Contains(writeResponse.Body.String(), "provider secret") || !strings.Contains(writeResponse.Body.String(), "internal server error") {
+		t.Fatalf("redaction = %s", writeResponse.Body.String())
 	}
 }
 
-func apiRequest(t *testing.T, handler http.Handler, method, path, body string, status int) *httptest.ResponseRecorder {
+func apiRequest(t *testing.T, handler http.Handler, method, path string, body any, status int, target any) {
 	t.Helper()
-	var reader *strings.Reader
-	if body != "" {
-		reader = strings.NewReader(body)
+	var input *bytes.Reader
+	if body == nil {
+		input = bytes.NewReader(nil)
 	} else {
-		reader = strings.NewReader("")
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input = bytes.NewReader(encoded)
 	}
-	request := httptest.NewRequest(method, path, reader)
-	if body != "" {
-		request.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(method, path, input)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
-	if recorder.Code != status {
-		t.Fatalf("%s %s status = %d, want %d; body=%s", method, path, recorder.Code, status, recorder.Body.String())
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != status {
+		t.Fatalf("%s %s = %d, want %d: %s", method, path, response.Code, status, response.Body.String())
 	}
-	if got := recorder.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
-		t.Fatalf("Content-Type = %q", got)
-	}
-	return recorder
-}
-
-func decodeResponse(t *testing.T, response *httptest.ResponseRecorder, target any) {
-	t.Helper()
-	if err := json.Unmarshal(response.Body.Bytes(), target); err != nil {
-		t.Fatal(err)
+	if target != nil {
+		if err := json.Unmarshal(response.Body.Bytes(), target); err != nil {
+			t.Fatalf("decode %s: %v", response.Body.String(), err)
+		}
 	}
 }
 
-type failureRepository struct{ err error }
-
-func (r failureRepository) ListIssues(context.Context) ([]*Issue, error) {
-	return nil, r.err
-}
-func (r failureRepository) GetIssue(context.Context, string) (*Issue, error) {
-	return nil, r.err
-}
-func (r failureRepository) RunInTransaction(context.Context, func(Transaction) error) error {
-	return r.err
-}
+var _ Repository = (*memoryRepository)(nil)

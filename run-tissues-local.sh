@@ -59,7 +59,7 @@ tissues:
   enabled: true
   storage:
     project_id: ${PROJECT_ID}
-    namespace: tissues-dogfood
+    namespace: tissues-dogfood-projects
   auth:
     enabled: true
     broker_url: ${ORIGIN}
@@ -86,7 +86,7 @@ echo "Starting tissues local dogfood..."
 echo
 echo "  Project:   ${PROJECT_ID}"
 echo "  URL:       ${ORIGIN}/?view=open"
-echo "  Datastore: tissues-dogfood"
+echo "  Datastore: tissues-dogfood-projects"
 echo "  Profile:   ${PROFILE_FILE}"
 echo
 echo "Open this in your browser:"

@@ -42,7 +42,13 @@ API key at launch time:
 ```
 
 The key is passed only to the process environment; do not store a real key in
-the repository.
+the repository. The launcher uses the persistent Project-era tissues namespace
+`tissues-dogfood-projects`; the pre-Project `tissues-dogfood` namespace is
+left untouched.
+
+During pre-deployment Project/Issue product iteration, current
+`tissues-dogfood-projects` data may be intentionally reset instead of migrated;
+the namespace itself remains the persistent shared dogfood target.
 
 Typed Go `Config` structs are the configuration schema. A named `Profile[T]`
 is resolved, validated, immutable, and revisioned. Values resolve as:
@@ -68,3 +74,20 @@ requires an explicit project ID and defaults its namespace to `tissues`.
 Authentication enforcement remains independently optional and preserves exact
 safe local return URLs. Secrets are tagged and redacted from configuration
 diagnostics.
+
+The shared installation contains Projects keyed by immutable uppercase prefixes
+such as `FLUENT`. The product presents that key as the Project ID. Each Project
+transactionally allocates immutable Issue numbers, producing a stable,
+human-facing Issue ID such as `FLUENT-17`. A separate opaque 26-character
+entity identity remains internal to persistence and is not exposed by the
+browser API.
+
+The browser has two navigation areas: Projects and Issues. Each opens a
+cursor-paged table in the main work area; creation and editing use dedicated
+main views rather than contextual controls in the side navigation. Project
+IDs and Issue IDs remain immutable. Issue create and edit forms contain only
+Project selection (on create), title, and Markdown description. Existing Issue
+hierarchy changes use the dedicated parent dialog. The Issues overview can be
+filtered by Project; that persistent filter also defaults the Project selected
+when creating an Issue. Choosing a different Project in the create form does
+not change the overview filter.

@@ -1,0 +1,6 @@
+indexes:
+  - kind: tissues_issue
+    ancestor: yes
+    properties:
+      - name: Updated
+        direction: desc

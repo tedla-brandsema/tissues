@@ -68,7 +68,7 @@ does not mutate outer Server configuration.
 `services/auth` owns the auth contribution, broker composition, routes,
 behavior, and `services/auth/frontend`. Reusable broker infrastructure remains
 in `lib/auth/broker`, and reusable GCP auth adapters remain in `lib/gcp/auth`.
-`services/tissues` owns the tissues contribution, Issue and Comment domain,
+`services/tissues` owns the tissues contribution, Project, Issue, and Comment domain,
 repository contract, same-origin JSON and browser routes,
 `services/tissues/frontend`, and its
 schema-specific Cloud Datastore adapter under `services/tissues/datastore`.
@@ -81,18 +81,27 @@ single shared issue workspace.
 
 ## Tissues domain and Datastore
 
-There is exactly one Issue type. Parentage is mutable `ParentID` relationship
-data, not an Epic/Story/Task taxonomy. Comments belong to an Issue. Markdown is
-canonical rich text; trusted client HTML is not persisted.
+Project is the only layer above the single Issue type. A canonical immutable
+Project key scopes a transactional `NextIssueNumber` allocator. Issues retain
+an opaque 26-character entity identity for internal persistence and expose a
+derived, stable human Issue ID such as `FLUENT-17`. Parentage is persisted as
+opaque `ParentID` relationship data inside one Project and exposed through the
+browser API as the derived parent issue ID; Issue-ID resolution and hierarchy
+assertions occur in the same transaction as mutation.
+Comments belong to an Issue. Markdown is canonical rich text; trusted client
+HTML is not persisted.
 
-Issue IDs and Comment IDs are 16 random bytes encoded as lowercase, unpadded
-base32 (26 characters, no timestamp semantics). Datastore uses that value as a
-named StringID. `tissues_issue` entities are root keys and store only canonical
-Issue fields. `tissues_comment` entities are children of their Issue key and
-store only canonical Comment fields. Descriptions and bodies are unindexed;
-children and comments are derived and deterministically sorted in Go. Domain
-timestamps are stored as Unix-nanosecond integers so Datastore's native
-timestamp precision cannot erase the required one-nanosecond comment ordering.
+Opaque Issue entity identities and Comment IDs are 16 random bytes encoded as
+lowercase, unpadded base32 (26 characters, no timestamp semantics). A
+`tissues_project` named key is the immutable entity-group root. Its
+`tissues_issue` children retain opaque named identities, and the
+`tissues_issue_ref` Issue-ID index maps the decimal number to that opaque
+identity. `tissues_comment` entities descend from their Issue. Issue
+hierarchy is relationship data, never Datastore ancestry. Descriptions and
+bodies are unindexed; trees, parent issue IDs, and comments are derived and
+deterministically sorted in Go. Domain timestamps are stored as Unix-nanosecond
+integers so Datastore's native timestamp precision cannot erase the required
+one-nanosecond comment ordering.
 
 Service-specific frontends live with their Service. `lib/frontend` owns only
 reusable shadcn-derived primitives, Tailwind theme/base styles, and generic
@@ -105,3 +114,28 @@ enabled, initial HTML navigation retains the relying-party login redirect and
 exact safe return URL, while unauthenticated API requests receive a structured
 JSON 401. Trusted request identity supplies Comment authors at this HTTP
 boundary; the domain remains provider-neutral.
+
+## Browser information architecture
+
+The tissues shell has navigation-only entries for `Projects` and `Issues`.
+They select one of four explicit, query-string-restorable main views:
+
+```text
+ProjectsOverview -> ProjectView (create or existing)
+IssuesOverview   -> IssueView   (create or existing)
+```
+
+Overview tables use opaque Datastore cursors with Previous/Next history in the
+browser. Projects are ordered by canonical key. The global Issue overview is a
+lightweight cross-Project read model ordered by `Updated` descending. Its
+optional Project filter is an ancestor query, persists locally in the browser,
+and supplies the initial Project for Issue creation. The read model derives
+and validates human Issue IDs and parent issue IDs without exposing opaque Issue
+entity identities or loading recursive children/comments. Project-scoped Issue
+trees remain the source for parent-Issue-ID suggestions.
+
+Issue create and PATCH payloads contain content only: title and canonical
+Markdown description. Hierarchy is changed only for an existing Issue through
+the explicit parent route and dedicated browser dialog. That transaction
+resolves and validates the parent before persisting the relationship; an empty
+parent issue ID detaches the Issue.

@@ -3,305 +3,275 @@ package tissues
 import (
 	"context"
 	"errors"
-	"sort"
+	"reflect"
 	"testing"
 	"time"
-
-	"github.com/tedla-brandsema/tissues/lib/core/config"
 )
 
-func TestIssueLifecycleHierarchyAndComments(t *testing.T) {
+func TestProjectLifecycleAndIndependentIssueAllocation(t *testing.T) {
 	ctx := context.Background()
 	repo := newMemoryRepository()
 	svc := testService(t, repo)
-	base := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
-	svc.now = func() time.Time { return base }
-	ids := []string{"aaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccccc", "dddddddddddddddddddddddddd", "eeeeeeeeeeeeeeeeeeeeeeeeee", "ffffffffffffffffffffffffff"}
-	svc.newID = func() (string, error) { id := ids[0]; ids = ids[1:]; return id, nil }
-	a, err := svc.CreateIssue(ctx, CreateIssueRequest{Title: "A", Description: "alpha"})
+	fluent, err := svc.CreateProject(ctx, " fluent ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := svc.CreateIssue(ctx, CreateIssueRequest{Title: "B", Description: "beta", ParentID: a.ID})
+	if fluent.Key != "FLUENT" || fluent.NextIssueNumber != 1 {
+		t.Fatalf("project = %#v", fluent)
+	}
+	if _, err := svc.CreateProject(ctx, "fluent"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate = %v", err)
+	}
+	if _, err := svc.CreateProject(ctx, "bad-key"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid = %v", err)
+	}
+	if _, err := svc.CreateProject(ctx, "tissues"); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 1; i <= 3; i++ {
+		issue, err := svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "Issue", Description: "body"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if issue.Number != int64(i) || issue.Ref != "FLUENT-"+string(rune('0'+i)) {
+			t.Fatalf("issue %d = %#v", i, issue)
+		}
+	}
+	for i := 1; i <= 2; i++ {
+		issue, err := svc.CreateIssue(ctx, "TISSUES", CreateIssueRequest{Title: "Issue", Description: "body"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if issue.Number != int64(i) {
+			t.Fatalf("TISSUES number = %d", issue.Number)
+		}
+	}
+	issues, err := svc.ListIssues(ctx, "fluent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := svc.CreateIssue(ctx, CreateIssueRequest{Title: "C"})
+	if got := issueNumbers(issues); !reflect.DeepEqual(got, []int64{1, 2, 3}) {
+		t.Fatalf("numbers = %v", got)
+	}
+	projects, err := svc.ListProjects(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := svc.CreateIssue(ctx, CreateIssueRequest{Title: "D", ParentID: b.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	dCreated, dUpdated := d.Created, d.Updated
-	if a.State != StateOpen || !a.Created.Equal(a.Updated) || a.Created.Location() != time.UTC {
-		t.Fatalf("created A=%#v", a)
-	}
-	roots, err := svc.ListIssues(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(roots) != 2 || roots[0].ID != a.ID || roots[0].Children[0].ID != b.ID {
-		t.Fatalf("roots=%#v", roots)
-	}
-	newTitle, newDescription := "B updated", "new markdown"
-	base = base.Add(time.Minute)
-	updated, err := svc.UpdateIssue(ctx, UpdateIssueRequest{ID: b.ID, Title: &newTitle, Description: &newDescription})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.ID != b.ID || updated.Title != newTitle || updated.Description != newDescription || !updated.Created.Equal(b.Created) || !updated.Updated.Equal(base) {
-		t.Fatalf("updated=%#v", updated)
-	}
-	firstUpdated := updated.Updated
-	base = base.Add(time.Minute)
-	moved, err := svc.MoveIssue(ctx, b.ID, c.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if moved.ID != b.ID || moved.ParentID != c.ID || moved.Title != newTitle || !moved.Updated.Equal(base) {
-		t.Fatalf("moved=%#v", moved)
-	}
-	readBWithSubtree, _ := svc.GetIssue(ctx, b.ID)
-	if len(readBWithSubtree.Children) != 1 || readBWithSubtree.Children[0].ID != d.ID || !readBWithSubtree.Children[0].Created.Equal(dCreated) || !readBWithSubtree.Children[0].Updated.Equal(dUpdated) {
-		t.Fatalf("move did not preserve subtree: %#v", readBWithSubtree)
-	}
-	if _, err := svc.MoveIssue(ctx, b.ID, b.ID); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("self-parent error=%v", err)
-	}
-	if _, err := svc.MoveIssue(ctx, c.ID, b.ID); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("cycle error=%v", err)
-	}
-	readC, _ := svc.GetIssue(ctx, c.ID)
-	if len(readC.Children) != 1 || readC.Children[0].ID != b.ID {
-		t.Fatalf("rejected cycle changed hierarchy: %#v", readC)
-	}
-	base = base.Add(time.Minute)
-	detached, err := svc.MoveIssue(ctx, b.ID, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if detached.ParentID != "" {
-		t.Fatalf("detach=%#v", detached)
-	}
-	base = base.Add(time.Minute)
-	if _, err := svc.MoveIssue(ctx, b.ID, a.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := svc.MoveIssue(ctx, b.ID, "zzzzzzzzzzzzzzzzzzzzzzzzzz"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("missing parent error=%v", err)
-	}
-	base = base.Add(time.Minute)
-	closed, err := svc.CloseIssue(ctx, b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if closed.State != StateClosed {
-		t.Fatalf("closed=%#v", closed)
-	}
-	closedAt := closed.Updated
-	base = base.Add(time.Minute)
-	closedAgain, err := svc.CloseIssue(ctx, b.ID)
-	if err != nil || !closedAgain.Updated.Equal(closedAt) {
-		t.Fatalf("repeated close=%#v,%v", closedAgain, err)
-	}
-	base = base.Add(time.Minute)
-	opened, err := svc.ReopenIssue(ctx, b.ID)
-	if err != nil || opened.State != StateOpen || !opened.Updated.Equal(base) {
-		t.Fatalf("reopen=%#v,%v", opened, err)
-	}
-	comment1, err := svc.AddComment(ctx, b.ID, "agent@example", "first")
-	if err != nil {
-		t.Fatal(err)
-	}
-	comment2, err := svc.AddComment(ctx, b.ID, "human@example", "second")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !comment2.Created.Equal(comment1.Created.Add(time.Nanosecond)) {
-		t.Fatalf("comment times %v,%v", comment1.Created, comment2.Created)
-	}
-	base = base.Add(time.Hour)
-	edited, err := svc.EditComment(ctx, b.ID, comment1.ID, "first edited")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if edited.ID != comment1.ID || edited.Author != comment1.Author || !edited.Created.Equal(comment1.Created) || !edited.Updated.Equal(base) {
-		t.Fatalf("edited=%#v", edited)
-	}
-	readB, err := svc.GetIssue(ctx, b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(readB.Comments) != 2 || readB.Comments[0].ID != comment1.ID || readB.Comments[1].ID != comment2.ID {
-		t.Fatalf("comments=%#v", readB.Comments)
-	}
-	if firstUpdated.Equal(readB.Updated) {
-		t.Fatal("expected subsequent mutations to advance issue timestamp")
+	if projects[0].Key != "FLUENT" || projects[1].Key != "TISSUES" {
+		t.Fatalf("projects = %#v", projects)
 	}
 }
 
-func TestNotFoundAndValidation(t *testing.T) {
-	svc := testService(t, newMemoryRepository())
+func TestHierarchyByReferenceAndImmutableIdentity(t *testing.T) {
 	ctx := context.Background()
-	svc.newID = func() (string, error) { return "aaaaaaaaaaaaaaaaaaaaaaaaaa", nil }
-	svc.now = func() time.Time { return time.Now().UTC() }
-	if _, err := svc.GetIssue(ctx, "missing"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("GetIssue error=%v", err)
-	}
-	if _, err := svc.CreateIssue(ctx, CreateIssueRequest{Title: ""}); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("CreateIssue error=%v", err)
-	}
-}
-func TestIDFailureIsInternal(t *testing.T) {
-	svc := testService(t, newMemoryRepository())
-	svc.newID = func() (string, error) { return "", errors.New("no entropy") }
-	if _, err := svc.CreateIssue(context.Background(), CreateIssueRequest{Title: "x"}); !errors.Is(err, ErrInternal) {
-		t.Fatalf("error=%v", err)
-	}
-}
-
-func TestTransactionRetriesReuseLogicalIDAndTimestamp(t *testing.T) {
-	repo := &retryRepository{}
+	repo := newMemoryRepository()
 	svc := testService(t, repo)
-	fixed := time.Date(2026, 8, 28, 12, 0, 0, 7, time.UTC)
-	svc.now = func() time.Time { return fixed }
-	svc.newID = func() (string, error) { return "aaaaaaaaaaaaaaaaaaaaaaaaaa", nil }
-	created, err := svc.CreateIssue(context.Background(), CreateIssueRequest{Title: "retry safe"})
+	if _, err := svc.CreateProject(ctx, "FLUENT"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateProject(ctx, "TISSUES"); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "A", Description: "a"})
+	b, _ := svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "B", Description: "b"})
+	c, _ := svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "C", Description: "c"})
+	foreign, _ := svc.CreateIssue(ctx, "TISSUES", CreateIssueRequest{Title: "Foreign", Description: "x"})
+	b, err := svc.MoveIssue(ctx, b.Ref, "FLUENT-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repo.puts) != 2 {
-		t.Fatalf("PutIssue calls=%d", len(repo.puts))
+	if b.ParentID != a.ID || b.ParentRef != a.Ref {
+		t.Fatalf("parent = %#v", b)
 	}
-	for _, put := range repo.puts {
-		if put.ID != created.ID || !put.Created.Equal(fixed) || !put.Updated.Equal(fixed) {
-			t.Fatalf("retry changed logical input: %#v", put)
-		}
+	project, _ := repo.GetProject(ctx, "FLUENT")
+	if project.NextIssueNumber != 4 {
+		t.Fatalf("allocator = %d", project.NextIssueNumber)
 	}
-}
-
-func testService(t *testing.T, repo Repository) *Service {
-	t.Helper()
-	profile, err := config.NewServiceProfile("test", Config{Enabled: true, Storage: StorageConfig{ProjectID: "example", Namespace: "test"}})
+	original := *b
+	moved, err := svc.MoveIssue(ctx, b.Ref, "FLUENT-3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	slot, err := config.NewSlot(profile)
+	if moved.ID != original.ID || moved.ProjectKey != original.ProjectKey || moved.Number != original.Number || moved.Ref != original.Ref || moved.ParentID != c.ID {
+		t.Fatalf("identity changed: %#v", moved)
+	}
+	if _, err := svc.MoveIssue(ctx, b.Ref, "FLUENT-999999"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing = %v", err)
+	}
+	unchanged, err := svc.GetIssue(ctx, b.Ref)
+	if err != nil || unchanged.ParentRef != c.Ref {
+		t.Fatalf("ghost rejection changed parent: %#v, %v", unchanged, err)
+	}
+	if _, err := svc.MoveIssue(ctx, b.Ref, foreign.Ref); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("cross project = %v", err)
+	}
+	if _, err := svc.MoveIssue(ctx, b.Ref, b.Ref); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("self = %v", err)
+	}
+	if _, err := svc.MoveIssue(ctx, c.Ref, b.Ref); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("cycle = %v", err)
+	}
+	detached, err := svc.MoveIssue(ctx, b.Ref, "")
+	if err != nil || detached.ParentID != "" || detached.ParentRef != "" {
+		t.Fatalf("detach = %#v, %v", detached, err)
+	}
+}
+
+func TestUpdatesAndCommentsRemainReferenceAddressed(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemoryRepository()
+	svc := testService(t, repo)
+	_, _ = svc.CreateProject(ctx, "FLUENT")
+	issue, _ := svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "Before", Description: "old"})
+	title, description := "After", "new"
+	updated, err := svc.UpdateIssue(ctx, UpdateIssueRequest{Ref: "fluent-1", Title: &title, Description: &description})
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := New(slot, repo)
+	if updated.ID != issue.ID || updated.Number != issue.Number || updated.Ref != issue.Ref || updated.ProjectKey != issue.ProjectKey {
+		t.Fatal("immutable identity changed")
+	}
+	comment, err := svc.AddComment(ctx, issue.Ref, "Ada", "first")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return svc
+	edited, err := svc.EditComment(ctx, issue.Ref, comment.ID, "edited")
+	if err != nil || edited.Body != "edited" || edited.ID != comment.ID {
+		t.Fatalf("comment = %#v, %v", edited, err)
+	}
+	second, err := svc.AddComment(ctx, issue.Ref, "Ada", "second")
+	if err != nil || !second.Created.Equal(comment.Created.Add(time.Nanosecond)) {
+		t.Fatalf("comment ordering = %#v, %v", second, err)
+	}
+	closed, _ := svc.CloseIssue(ctx, issue.Ref)
+	reopened, _ := svc.ReopenIssue(ctx, issue.Ref)
+	if closed.State != StateClosed || reopened.State != StateOpen {
+		t.Fatal("state transitions failed")
+	}
 }
 
-type memoryRepository struct {
-	issues   map[string]*Issue
-	comments map[string]map[string]*Comment
+func TestUpdateIssueAppliesContentWithoutChangingParent(t *testing.T) {
+	ctx := context.Background()
+	svc := testService(t, newMemoryRepository())
+	_, _ = svc.CreateProject(ctx, "FLUENT")
+	parent, _ := svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "Parent", Description: "parent"})
+	child, _ := svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "Child", Description: "child"})
+	child, _ = svc.MoveIssue(ctx, child.Ref, parent.Ref)
+	title, description := "Updated", "updated body"
+	updated, err := svc.UpdateIssue(ctx, UpdateIssueRequest{Ref: child.Ref, Title: &title, Description: &description})
+	if err != nil || updated.Title != title || updated.Description != description || updated.ParentID != parent.ID || updated.ParentRef != parent.Ref {
+		t.Fatalf("content update = %#v, %v", updated, err)
+	}
+	detached, err := svc.MoveIssue(ctx, child.Ref, "")
+	if err != nil || detached.ParentID != "" || detached.ParentRef != "" {
+		t.Fatalf("detach = %#v, %v", detached, err)
+	}
 }
 
-func newMemoryRepository() *memoryRepository {
-	return &memoryRepository{issues: map[string]*Issue{}, comments: map[string]map[string]*Comment{}}
-}
-func (m *memoryRepository) RunInTransaction(ctx context.Context, fn func(Transaction) error) error {
-	return fn(memoryTx{m})
-}
-func (m *memoryRepository) ListIssues(context.Context) ([]*Issue, error) {
-	flat := map[string]*Issue{}
-	for id, i := range m.issues {
-		flat[id] = cloneIssue(i)
-		flat[id].Children = nil
-		flat[id].Comments = nil
-		for _, c := range m.comments[id] {
-			flat[id].Comments = append(flat[id].Comments, cloneComment(c))
+func TestPagedProjectsAndGlobalIssueOverview(t *testing.T) {
+	ctx := context.Background()
+	svc := testService(t, newMemoryRepository())
+	for _, key := range []string{"TISSUES", "FLUENT", "TELONAUTICS"} {
+		_, _ = svc.CreateProject(ctx, key)
+		_, _ = svc.CreateIssue(ctx, key, CreateIssueRequest{Title: key, Description: "body"})
+	}
+	first, err := svc.ListProjectsPage(ctx, 2, "")
+	if err != nil || len(first.Projects) != 2 || first.Projects[0].Key != "FLUENT" || first.Projects[1].Key != "TELONAUTICS" || first.NextCursor == "" {
+		t.Fatalf("first Project page = %#v, %v", first, err)
+	}
+	second, err := svc.ListProjectsPage(ctx, 2, first.NextCursor)
+	if err != nil || len(second.Projects) != 1 || second.Projects[0].Key != "TISSUES" || second.NextCursor != "" {
+		t.Fatalf("second Project page = %#v, %v", second, err)
+	}
+	issues, err := svc.ListIssueOverviewsPage(ctx, 2, "", "")
+	if err != nil || len(issues.Issues) != 2 || issues.NextCursor == "" {
+		t.Fatalf("first Issue page = %#v, %v", issues, err)
+	}
+	last, err := svc.ListIssueOverviewsPage(ctx, 2, issues.NextCursor, "")
+	if err != nil || len(last.Issues) != 1 || last.NextCursor != "" {
+		t.Fatalf("last Issue page = %#v, %v", last, err)
+	}
+	for _, size := range []int{0, 101} {
+		if _, err := svc.ListProjectsPage(ctx, size, ""); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("Project page size %d = %v", size, err)
 		}
 	}
-	var roots []*Issue
-	for _, i := range flat {
-		if i.ParentID == "" {
-			roots = append(roots, i)
-		} else {
-			flat[i.ParentID].Children = append(flat[i.ParentID].Children, i)
-		}
+	filtered, err := svc.ListIssueOverviewsPage(ctx, 2, "", "fluent")
+	if err != nil || len(filtered.Issues) != 1 || filtered.Issues[0].ProjectKey != "FLUENT" {
+		t.Fatalf("filtered Issues = %#v, %v", filtered, err)
 	}
-	sortIssues(roots)
-	return roots, nil
-}
-func (m *memoryRepository) GetIssue(ctx context.Context, id string) (*Issue, error) {
-	roots, _ := m.ListIssues(ctx)
-	if issue := findIssue(roots, id); issue != nil {
-		return issue, nil
+	if _, err := svc.ListIssueOverviewsPage(ctx, 2, "", "bad-key"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid Project = %v", err)
 	}
-	return nil, ErrNotFound
+	if _, err := svc.ListIssueOverviewsPage(ctx, 2, "", "MISSING"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing Project = %v", err)
+	}
+	if _, err := svc.ListIssueOverviewsPage(ctx, 2, "not-a-cursor", ""); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid cursor = %v", err)
+	}
 }
 
-type memoryTx struct{ repo *memoryRepository }
-
-func (t memoryTx) GetIssue(_ context.Context, id string) (*Issue, error) {
-	i := t.repo.issues[id]
-	if i == nil {
-		return nil, ErrNotFound
-	}
-	return cloneIssue(i), nil
-}
-func (t memoryTx) GetComment(_ context.Context, issueID, id string) (*Comment, error) {
-	c := t.repo.comments[issueID][id]
-	if c == nil {
-		return nil, ErrNotFound
-	}
-	return cloneComment(c), nil
-}
-func (t memoryTx) ListComments(_ context.Context, issueID string) ([]*Comment, error) {
-	var out []*Comment
-	for _, c := range t.repo.comments[issueID] {
-		out = append(out, cloneComment(c))
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Created.Equal(out[j].Created) {
-			return out[i].ID < out[j].ID
-		}
-		return out[i].Created.Before(out[j].Created)
-	})
-	return out, nil
-}
-func (t memoryTx) PutIssue(_ context.Context, i *Issue) error {
-	t.repo.issues[i.ID] = cloneIssue(i)
-	t.repo.issues[i.ID].Children = nil
-	t.repo.issues[i.ID].Comments = nil
-	return nil
-}
-func (t memoryTx) PutComment(_ context.Context, issueID string, c *Comment) error {
-	if t.repo.comments[issueID] == nil {
-		t.repo.comments[issueID] = map[string]*Comment{}
-	}
-	t.repo.comments[issueID][c.ID] = cloneComment(c)
-	return nil
+type retryRepository struct {
+	*memoryRepository
+	attempts    int
+	seenIDs     []string
+	seenNumbers []int64
 }
 
-type retryRepository struct{ puts []*Issue }
-
-func (r *retryRepository) ListIssues(context.Context) ([]*Issue, error)     { return nil, nil }
-func (r *retryRepository) GetIssue(context.Context, string) (*Issue, error) { return nil, ErrNotFound }
 func (r *retryRepository) RunInTransaction(ctx context.Context, fn func(Transaction) error) error {
-	for range 2 {
-		if err := fn(retryTx{r}); err != nil {
-			return err
-		}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	first := r.copy()
+	if err := fn(recordingTx{memoryTx{repo: first}, r}); err != nil {
+		return err
 	}
+	r.attempts++
+	// Simulate a concurrent winning allocation before the retry.
+	winning := cloneProject(first.projects["FLUENT"])
+	winning.NextIssueNumber = 2
+	r.projects["FLUENT"] = winning
+	second := r.copy()
+	if err := fn(recordingTx{memoryTx{repo: second}, r}); err != nil {
+		return err
+	}
+	r.attempts++
+	r.projects, r.issues, r.refs, r.comments = second.projects, second.issues, second.refs, second.comments
 	return nil
 }
 
-type retryTx struct{ repo *retryRepository }
-
-func (retryTx) GetIssue(context.Context, string) (*Issue, error)             { return nil, ErrNotFound }
-func (retryTx) GetComment(context.Context, string, string) (*Comment, error) { return nil, ErrNotFound }
-func (retryTx) ListComments(context.Context, string) ([]*Comment, error)     { return nil, nil }
-func (t retryTx) PutIssue(_ context.Context, i *Issue) error {
-	t.repo.puts = append(t.repo.puts, cloneIssue(i))
-	return nil
+type recordingTx struct {
+	memoryTx
+	owner *retryRepository
 }
-func (retryTx) PutComment(context.Context, string, *Comment) error { return nil }
+
+func (t recordingTx) PutIssue(ctx context.Context, issue *Issue) error {
+	t.owner.seenIDs = append(t.owner.seenIDs, issue.ID)
+	t.owner.seenNumbers = append(t.owner.seenNumbers, issue.Number)
+	return t.memoryTx.PutIssue(ctx, issue)
+}
+
+func TestTransactionRetryReusesIDAndTimestampButReallocatesNumber(t *testing.T) {
+	ctx := context.Background()
+	base := newMemoryRepository()
+	svc := testService(t, base)
+	project, _ := svc.CreateProject(ctx, "FLUENT")
+	if project.NextIssueNumber != 1 {
+		t.Fatal(project.NextIssueNumber)
+	}
+	retry := &retryRepository{memoryRepository: base}
+	svc.repo = retry
+	created, err := svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "Retry", Description: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.attempts != 2 || retry.seenIDs[0] != retry.seenIDs[1] || retry.seenNumbers[0] != 1 || retry.seenNumbers[1] != 2 {
+		t.Fatalf("retry IDs=%v numbers=%v", retry.seenIDs, retry.seenNumbers)
+	}
+	if created.Number != 2 || created.Ref != "FLUENT-2" {
+		t.Fatalf("created = %#v", created)
+	}
+	if !created.Created.Equal(time.Date(2026, 1, 2, 3, 4, 5, 6, time.UTC)) {
+		t.Fatalf("created time = %v", created.Created)
+	}
+}

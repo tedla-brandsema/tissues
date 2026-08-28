@@ -81,7 +81,7 @@ func TestAuthEnabledPreservesExactOriginalRequestURI(t *testing.T) {
 	if err := svc.RegisterRoutes(mux); err != nil {
 		t.Fatal(err)
 	}
-	requestURI := "/?view=open&selected=abc"
+	requestURI := "/?view=issue&issue=FLUENT-17"
 	unauth := httptest.NewRecorder()
 	mux.ServeHTTP(unauth, httptest.NewRequest(http.MethodGet, requestURI, nil))
 	if unauth.Code != http.StatusSeeOther {
@@ -112,7 +112,7 @@ func TestAuthEnabledPreservesExactOriginalRequestURI(t *testing.T) {
 		t.Fatalf("authenticated bootstrap=%d %q", page.Code, page.Body.String())
 	}
 	api := httptest.NewRecorder()
-	mux.ServeHTTP(api, httptest.NewRequest(http.MethodGet, apiBasePath+"/issues", nil))
+	mux.ServeHTTP(api, httptest.NewRequest(http.MethodGet, apiBasePath+"/projects", nil))
 	if api.Code != http.StatusUnauthorized || !strings.Contains(api.Header().Get("Content-Type"), "application/json") || !strings.Contains(api.Body.String(), `"kind":"unauthorized"`) {
 		t.Fatalf("unauthenticated API=%d %q %q", api.Code, api.Header().Get("Content-Type"), api.Body.String())
 	}

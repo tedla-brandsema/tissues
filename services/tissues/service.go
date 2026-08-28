@@ -22,10 +22,13 @@ type Service struct {
 
 var _ service.Service = (*Service)(nil)
 
+const (
+	DefaultPageSize = 25
+	MaxPageSize     = 100
+)
+
 type Option func(*Service)
 
-// WithHTTPClient supplies the client used for relying-party authentication.
-// A nil/default client preserves net/http's standard client behavior.
 func WithHTTPClient(client *http.Client) Option {
 	return func(s *Service) { s.httpClient = client }
 }
@@ -51,8 +54,101 @@ func New(profile service.Profile[Config], repo Repository, options ...Option) (*
 
 func (*Service) Name() string { return "tissues" }
 
-func (s *Service) ListIssues(ctx context.Context) ([]*Issue, error) {
-	issues, err := s.repo.ListIssues(ctx)
+func (s *Service) ListProjects(ctx context.Context) ([]*Project, error) {
+	var projects []*Project
+	cursor := ""
+	for {
+		page, err := s.ListProjectsPage(ctx, MaxPageSize, cursor)
+		if err != nil {
+			return nil, err
+		}
+		projects = append(projects, page.Projects...)
+		if page.NextCursor == "" {
+			return projects, nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+func (s *Service) ListProjectsPage(ctx context.Context, size int, cursor string) (*ProjectPage, error) {
+	if size <= 0 || size > MaxPageSize {
+		return nil, fmt.Errorf("%w: page_size must be between 1 and %d", ErrInvalid, MaxPageSize)
+	}
+	page, err := s.repo.ListProjectsPage(ctx, PageRequest{Size: size, Cursor: cursor})
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	for i, project := range page.Projects {
+		page.Projects[i] = cloneProject(project)
+	}
+	return page, nil
+}
+
+func (s *Service) ListIssueOverviewsPage(ctx context.Context, size int, cursor, projectKey string) (*IssueOverviewPage, error) {
+	if size <= 0 || size > MaxPageSize {
+		return nil, fmt.Errorf("%w: page_size must be between 1 and %d", ErrInvalid, MaxPageSize)
+	}
+	if projectKey != "" {
+		var err error
+		projectKey, err = canonicalProjectInput(projectKey)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.repo.GetProject(ctx, projectKey); err != nil {
+			return nil, persistenceError(err)
+		}
+	}
+	page, err := s.repo.ListIssueOverviewsPage(ctx, PageRequest{Size: size, Cursor: cursor, ProjectKey: projectKey})
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	return page, nil
+}
+
+func (s *Service) GetProject(ctx context.Context, key string) (*Project, error) {
+	canonical, err := canonicalProjectInput(key)
+	if err != nil {
+		return nil, err
+	}
+	project, err := s.repo.GetProject(ctx, canonical)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	return cloneProject(project), nil
+}
+
+func (s *Service) CreateProject(ctx context.Context, key string) (*Project, error) {
+	canonical, err := canonicalProjectInput(key)
+	if err != nil {
+		return nil, err
+	}
+	created := &Project{Key: canonical, Created: Timestamp(s.now()), NextIssueNumber: 1}
+	if err := created.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
+		if _, getErr := tx.GetProject(ctx, canonical); getErr == nil {
+			return fmt.Errorf("%w: project %q already exists", ErrConflict, canonical)
+		} else if !errors.Is(getErr, ErrNotFound) {
+			return getErr
+		}
+		return tx.PutProject(ctx, created)
+	})
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	return cloneProject(created), nil
+}
+
+func (s *Service) ListIssues(ctx context.Context, projectKey string) ([]*Issue, error) {
+	canonical, err := canonicalProjectInput(projectKey)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.repo.GetProject(ctx, canonical); err != nil {
+		return nil, persistenceError(err)
+	}
+	issues, err := s.repo.ListIssues(ctx, canonical)
 	if err != nil {
 		return nil, persistenceError(err)
 	}
@@ -60,66 +156,99 @@ func (s *Service) ListIssues(ctx context.Context) ([]*Issue, error) {
 	return issues, nil
 }
 
-func (s *Service) GetIssue(ctx context.Context, id string) (*Issue, error) {
-	issue, err := s.repo.GetIssue(ctx, id)
+func (s *Service) GetIssue(ctx context.Context, value string) (*Issue, error) {
+	ref, err := issueRefInput(value)
+	if err != nil {
+		return nil, err
+	}
+	issue, err := s.repo.ResolveIssue(ctx, ref)
 	if err != nil {
 		return nil, persistenceError(err)
 	}
 	return issue, nil
 }
 
-type CreateIssueRequest struct{ ParentID, Title, Description string }
+type CreateIssueRequest struct {
+	Title       string
+	Description string
+}
 
-func (s *Service) CreateIssue(ctx context.Context, req CreateIssueRequest) (*Issue, error) {
+func (s *Service) CreateIssue(ctx context.Context, projectKey string, req CreateIssueRequest) (*Issue, error) {
+	projectKey, err := canonicalProjectInput(projectKey)
+	if err != nil {
+		return nil, err
+	}
 	id, err := s.newID()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInternal, err)
 	}
 	now := Timestamp(s.now())
-	created := &Issue{ID: id, Title: req.Title, State: StateOpen, Created: now, Updated: now, Description: req.Description, ParentID: req.ParentID}
-	if err := created.Validate(); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
-	}
+	var result *Issue
 	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
-		if _, getErr := tx.GetIssue(ctx, id); getErr == nil {
+		project, err := tx.GetProject(ctx, projectKey)
+		if err != nil {
+			return err
+		}
+		if project.NextIssueNumber <= 0 {
+			return fmt.Errorf("%w: project %s has invalid allocator state", ErrInternal, projectKey)
+		}
+		ref := IssueRef{ProjectKey: projectKey, Number: project.NextIssueNumber}
+		if _, getErr := tx.ResolveIssue(ctx, ref); getErr == nil {
+			return fmt.Errorf("%w: issue reference %s already exists", ErrConflict, ref)
+		} else if !errors.Is(getErr, ErrNotFound) {
+			return getErr
+		}
+		if _, getErr := tx.GetIssue(ctx, projectKey, id); getErr == nil {
 			return fmt.Errorf("%w: issue ID %q already exists", ErrConflict, id)
 		} else if !errors.Is(getErr, ErrNotFound) {
 			return getErr
 		}
-		if req.ParentID != "" {
-			if _, err := tx.GetIssue(ctx, req.ParentID); err != nil {
-				return err
-			}
+		created := &Issue{ID: id, ProjectKey: projectKey, Number: ref.Number, Ref: ref.String(), Title: req.Title, State: StateOpen, Created: now, Updated: now, Description: req.Description}
+		if err := created.Validate(); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalid, err)
 		}
-		return tx.PutIssue(ctx, created)
+		if err := tx.PutIssue(ctx, created); err != nil {
+			return err
+		}
+		if err := tx.PutIssueRef(ctx, ref, id); err != nil {
+			return err
+		}
+		project.NextIssueNumber++
+		if err := tx.PutProject(ctx, project); err != nil {
+			return err
+		}
+		result = cloneIssue(created)
+		return nil
 	})
 	if err != nil {
 		return nil, persistenceError(err)
 	}
-	return cloneIssue(created), nil
+	return result, nil
 }
 
 type UpdateIssueRequest struct {
-	ID                 string
+	Ref                string
 	Title, Description *string
 }
 
 func (s *Service) UpdateIssue(ctx context.Context, req UpdateIssueRequest) (*Issue, error) {
+	ref, err := issueRefInput(req.Ref)
+	if err != nil {
+		return nil, err
+	}
 	now := Timestamp(s.now())
 	var result *Issue
-	err := s.repo.RunInTransaction(ctx, func(tx Transaction) error {
-		issue, err := tx.GetIssue(ctx, req.ID)
+	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
+		issue, err := tx.ResolveIssue(ctx, ref)
 		if err != nil {
 			return err
 		}
 		changed := false
 		if req.Title != nil && *req.Title != issue.Title {
-			issue.Title = *req.Title
-			changed = true
+			issue.Title, changed = *req.Title, true
 		}
 		if req.Description != nil && *req.Description != issue.Description {
-			issue.Description = *req.Description
-			changed = true
+			issue.Description, changed = *req.Description, true
 		}
 		if changed {
 			issue.Updated = now
@@ -139,37 +268,27 @@ func (s *Service) UpdateIssue(ctx context.Context, req UpdateIssueRequest) (*Iss
 	return result, nil
 }
 
-func (s *Service) MoveIssue(ctx context.Context, id, parentID string) (*Issue, error) {
+func (s *Service) MoveIssue(ctx context.Context, issueValue, parentValue string) (*Issue, error) {
+	ref, err := issueRefInput(issueValue)
+	if err != nil {
+		return nil, err
+	}
 	now := Timestamp(s.now())
 	var result *Issue
-	err := s.repo.RunInTransaction(ctx, func(tx Transaction) error {
-		issue, err := tx.GetIssue(ctx, id)
+	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
+		issue, err := tx.ResolveIssue(ctx, ref)
 		if err != nil {
 			return err
 		}
-		if parentID == id {
-			return fmt.Errorf("%w: issue %q cannot be its own parent", ErrInvalid, id)
+		parentID, parentCanonical, err := resolveParent(ctx, tx, issue, parentValue)
+		if err != nil {
+			return err
 		}
-		if parentID != "" {
-			visited := map[string]bool{}
-			for current := parentID; current != ""; {
-				if current == id {
-					return fmt.Errorf("%w: issue %q cannot be moved beneath its descendant %q", ErrInvalid, id, parentID)
-				}
-				if visited[current] {
-					return fmt.Errorf("%w: existing hierarchy cycle at issue %q", ErrInternal, current)
-				}
-				visited[current] = true
-				parent, getErr := tx.GetIssue(ctx, current)
-				if getErr != nil {
-					return getErr
-				}
-				current = parent.ParentID
+		if issue.ParentID != parentID || issue.ParentRef != parentCanonical {
+			issue.ParentID, issue.ParentRef, issue.Updated = parentID, parentCanonical, now
+			if err := issue.Validate(); err != nil {
+				return fmt.Errorf("%w: %v", ErrInvalid, err)
 			}
-		}
-		if issue.ParentID != parentID {
-			issue.ParentID = parentID
-			issue.Updated = now
 			if err := tx.PutIssue(ctx, issue); err != nil {
 				return err
 			}
@@ -183,24 +302,68 @@ func (s *Service) MoveIssue(ctx context.Context, id, parentID string) (*Issue, e
 	return result, nil
 }
 
-func (s *Service) CloseIssue(ctx context.Context, id string) (*Issue, error) {
-	return s.setState(ctx, id, StateClosed)
-}
-func (s *Service) ReopenIssue(ctx context.Context, id string) (*Issue, error) {
-	return s.setState(ctx, id, StateOpen)
+func resolveParent(ctx context.Context, tx Transaction, issue *Issue, parentValue string) (string, string, error) {
+	if parentValue == "" {
+		return "", "", nil
+	}
+	parentRef, err := issueRefInput(parentValue)
+	if err != nil {
+		return "", "", err
+	}
+	if parentRef.ProjectKey != issue.ProjectKey {
+		return "", "", fmt.Errorf("%w: parent reference must belong to project %s", ErrInvalid, issue.ProjectKey)
+	}
+	parent, err := tx.ResolveIssue(ctx, parentRef)
+	if err != nil {
+		return "", "", err
+	}
+	if parent.ProjectKey != issue.ProjectKey {
+		return "", "", fmt.Errorf("%w: parent reference must belong to project %s", ErrInvalid, issue.ProjectKey)
+	}
+	if parent.ID == issue.ID {
+		return "", "", fmt.Errorf("%w: issue %s cannot be its own parent", ErrInvalid, issue.Ref)
+	}
+	visited := map[string]bool{}
+	for current := parent; current != nil; {
+		if current.ID == issue.ID {
+			return "", "", fmt.Errorf("%w: issue %s cannot be moved beneath descendant %s", ErrInvalid, issue.Ref, parent.Ref)
+		}
+		if visited[current.ID] {
+			return "", "", fmt.Errorf("%w: existing hierarchy cycle at issue %s", ErrInternal, current.Ref)
+		}
+		visited[current.ID] = true
+		if current.ParentID == "" {
+			break
+		}
+		current, err = tx.GetIssue(ctx, issue.ProjectKey, current.ParentID)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	return parent.ID, parent.Ref, nil
 }
 
-func (s *Service) setState(ctx context.Context, id string, state State) (*Issue, error) {
+func (s *Service) CloseIssue(ctx context.Context, ref string) (*Issue, error) {
+	return s.setState(ctx, ref, StateClosed)
+}
+func (s *Service) ReopenIssue(ctx context.Context, ref string) (*Issue, error) {
+	return s.setState(ctx, ref, StateOpen)
+}
+
+func (s *Service) setState(ctx context.Context, value string, state State) (*Issue, error) {
+	ref, err := issueRefInput(value)
+	if err != nil {
+		return nil, err
+	}
 	now := Timestamp(s.now())
 	var result *Issue
-	err := s.repo.RunInTransaction(ctx, func(tx Transaction) error {
-		issue, err := tx.GetIssue(ctx, id)
+	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
+		issue, err := tx.ResolveIssue(ctx, ref)
 		if err != nil {
 			return err
 		}
 		if issue.State != state {
-			issue.State = state
-			issue.Updated = now
+			issue.State, issue.Updated = state, now
 			if err := tx.PutIssue(ctx, issue); err != nil {
 				return err
 			}
@@ -214,7 +377,11 @@ func (s *Service) setState(ctx context.Context, id string, state State) (*Issue,
 	return result, nil
 }
 
-func (s *Service) AddComment(ctx context.Context, issueID, author, body string) (*Comment, error) {
+func (s *Service) AddComment(ctx context.Context, issueValue, author, body string) (*Comment, error) {
+	ref, err := issueRefInput(issueValue)
+	if err != nil {
+		return nil, err
+	}
 	id, err := s.newID()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInternal, err)
@@ -222,16 +389,16 @@ func (s *Service) AddComment(ctx context.Context, issueID, author, body string) 
 	wallTime := Timestamp(s.now())
 	var result *Comment
 	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
-		issue, err := tx.GetIssue(ctx, issueID)
+		issue, err := tx.ResolveIssue(ctx, ref)
 		if err != nil {
 			return err
 		}
-		if _, getErr := tx.GetComment(ctx, issueID, id); getErr == nil {
+		if _, getErr := tx.GetComment(ctx, issue.ProjectKey, issue.ID, id); getErr == nil {
 			return fmt.Errorf("%w: comment ID %q already exists", ErrConflict, id)
 		} else if !errors.Is(getErr, ErrNotFound) {
 			return getErr
 		}
-		comments, err := tx.ListComments(ctx, issueID)
+		comments, err := tx.ListComments(ctx, issue.ProjectKey, issue.ID)
 		if err != nil {
 			return err
 		}
@@ -244,12 +411,9 @@ func (s *Service) AddComment(ctx context.Context, issueID, author, body string) 
 		if err := comment.Validate(); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalid, err)
 		}
-		if err := tx.PutComment(ctx, issueID, comment); err != nil {
+		if err := tx.PutComment(ctx, issue.ProjectKey, issue.ID, comment); err != nil {
 			return err
 		}
-		// Rewriting the unchanged canonical Issue makes it the serialization
-		// boundary for concurrent comment appends. A retry then observes the
-		// winning comment and reapplies the +1ns rule with the same ID/wall time.
 		if err := tx.PutIssue(ctx, issue); err != nil {
 			return err
 		}
@@ -262,24 +426,28 @@ func (s *Service) AddComment(ctx context.Context, issueID, author, body string) 
 	return result, nil
 }
 
-func (s *Service) EditComment(ctx context.Context, issueID, commentID, body string) (*Comment, error) {
+func (s *Service) EditComment(ctx context.Context, issueValue, commentID, body string) (*Comment, error) {
+	ref, err := issueRefInput(issueValue)
+	if err != nil {
+		return nil, err
+	}
 	now := Timestamp(s.now())
 	var result *Comment
-	err := s.repo.RunInTransaction(ctx, func(tx Transaction) error {
-		if _, err := tx.GetIssue(ctx, issueID); err != nil {
+	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
+		issue, err := tx.ResolveIssue(ctx, ref)
+		if err != nil {
 			return err
 		}
-		comment, err := tx.GetComment(ctx, issueID, commentID)
+		comment, err := tx.GetComment(ctx, issue.ProjectKey, issue.ID, commentID)
 		if err != nil {
 			return err
 		}
 		if comment.Body != body {
-			comment.Body = body
-			comment.Updated = now
+			comment.Body, comment.Updated = body, now
 			if err := comment.Validate(); err != nil {
 				return fmt.Errorf("%w: %v", ErrInvalid, err)
 			}
-			if err := tx.PutComment(ctx, issueID, comment); err != nil {
+			if err := tx.PutComment(ctx, issue.ProjectKey, issue.ID, comment); err != nil {
 				return err
 			}
 		}
@@ -292,6 +460,22 @@ func (s *Service) EditComment(ctx context.Context, issueID, commentID, body stri
 	return result, nil
 }
 
+func canonicalProjectInput(value string) (string, error) {
+	key, err := CanonicalProjectKey(value)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	return key, nil
+}
+
+func issueRefInput(value string) (IssueRef, error) {
+	ref, err := ParseIssueRef(value)
+	if err != nil {
+		return IssueRef{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	return ref, nil
+}
+
 func persistenceError(err error) error {
 	for _, known := range []error{ErrNotFound, ErrInvalid, ErrConflict, ErrInternal} {
 		if errors.Is(err, known) {
@@ -301,17 +485,14 @@ func persistenceError(err error) error {
 	return ErrInternal
 }
 
-func findIssue(issues []*Issue, id string) *Issue {
-	for _, issue := range issues {
-		if issue.ID == id {
-			return issue
-		}
-		if found := findIssue(issue.Children, id); found != nil {
-			return found
-		}
+func cloneProject(project *Project) *Project {
+	if project == nil {
+		return nil
 	}
-	return nil
+	out := *project
+	return &out
 }
+
 func cloneComment(c *Comment) *Comment {
 	if c == nil {
 		return nil
@@ -319,6 +500,7 @@ func cloneComment(c *Comment) *Comment {
 	out := *c
 	return &out
 }
+
 func cloneIssue(i *Issue) *Issue {
 	if i == nil {
 		return nil
