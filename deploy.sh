@@ -17,7 +17,11 @@ IDENTITY_API_KEY_SECRET="tissues-identity-api-key"
 IMAGE_TAG="$(date -u +%Y%m%d-%H%M%S)"
 IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${SERVICE_NAME}:${IMAGE_TAG}"
 PACKAGE_DIR=""
+FIRST_DEPLOYMENT=false
 BOOTSTRAP_CREATED=false
+PRODUCTION_REVISION_DEPLOYED=false
+PRODUCTION_PROMOTED=false
+PUBLIC_ACCESS_ENABLED=false
 FINAL_DEPLOY_COMPLETE=false
 PACKAGE_ONLY=false
 IDENTITY_API_KEY="${TISSUES_IDENTITY_API_KEY-}"
@@ -36,8 +40,14 @@ cleanup() {
   if [[ -n "${PACKAGE_DIR}" && -d "${PACKAGE_DIR}" ]]; then
     rm -rf -- "${PACKAGE_DIR}"
   fi
-  if [[ "${BOOTSTRAP_CREATED}" == true && "${FINAL_DEPLOY_COMPLETE}" != true ]]; then
-    echo "Deployment stopped after creating a no-traffic bootstrap revision; no traffic was directed to it." >&2
+  if [[ "${FIRST_DEPLOYMENT}" == true && "${BOOTSTRAP_CREATED}" == true && "${FINAL_DEPLOY_COMPLETE}" != true ]]; then
+    if [[ "${PRODUCTION_PROMOTED}" == true && "${PUBLIC_ACCESS_ENABLED}" != true ]]; then
+      echo "The production revision was promoted, but public invocation was not enabled; the service remains private." >&2
+    elif [[ "${PRODUCTION_REVISION_DEPLOYED}" == true ]]; then
+      echo "The production revision remains at 0% traffic; the private bootstrap remains serving." >&2
+    else
+      echo "The private bootstrap remains serving; the production revision was not deployed." >&2
+    fi
   fi
   exit "${status}"
 }
@@ -231,17 +241,20 @@ gcloud builds submit "${PACKAGE_DIR}" \
 
 PUBLIC_ORIGIN="$(service_origin || true)"
 if [[ -z "${PUBLIC_ORIGIN}" ]]; then
-  echo "Creating a no-traffic bootstrap revision to establish the Cloud Run URL..."
-  gcloud run deploy "${SERVICE_NAME}" \
+  FIRST_DEPLOYMENT=true
+  echo "Creating a private bootstrap service to establish the Cloud Run URL..."
+  if ! gcloud run deploy "${SERVICE_NAME}" \
     --project="${PROJECT_ID}" \
     --region="${REGION}" \
     --platform=managed \
     --image="${IMAGE_URI}" \
     --service-account="${RUNTIME_SERVICE_ACCOUNT}" \
-    --no-traffic \
     --no-allow-unauthenticated \
     --set-env-vars="TISSUES_AUTH_ENABLED=false,TISSUES_TISSUES_ENABLED=false" \
-    --quiet
+    --quiet; then
+    echo "Private bootstrap service creation failed; no production revision or public IAM change was attempted." >&2
+    exit 1
+  fi
   BOOTSTRAP_CREATED=true
   PUBLIC_ORIGIN="$(service_origin)"
 fi
@@ -253,6 +266,10 @@ fi
 
 NON_SECRET_ENV="TISSUES_AUTH_ENABLED=true,TISSUES_AUTH_CLIENT_ID=tissues,TISSUES_AUTH_CLIENT_REDIRECT_URI=${PUBLIC_ORIGIN}/tissues/auth/callback,TISSUES_AUTH_PROJECT_ID=${PROJECT_ID},TISSUES_AUTH_DATASTORE_NS=${AUTH_NAMESPACE},TISSUES_AUTH_INSECURE_COOKIE=false,TISSUES_TISSUES_ENABLED=true,TISSUES_TISSUES_STORAGE_PROJECT_ID=${PROJECT_ID},TISSUES_TISSUES_STORAGE_NAMESPACE=${TISSUES_NAMESPACE},TISSUES_TISSUES_AUTH_ENABLED=true,TISSUES_TISSUES_AUTH_BROKER_URL=${PUBLIC_ORIGIN},TISSUES_TISSUES_AUTH_CLIENT_ID=tissues,TISSUES_TISSUES_AUTH_REDIRECT_URI=${PUBLIC_ORIGIN}/tissues/auth/callback,TISSUES_TISSUES_AUTH_INSECURE_COOKIE=false"
 SECRET_ENV="TISSUES_AUTH_SIGNING_SECRET=${AUTH_SIGNING_SECRET}:latest,TISSUES_AUTH_CLIENT_SECRET=${CLIENT_SECRET}:latest,TISSUES_AUTH_IDENTITY_API_KEY=${IDENTITY_API_KEY_SECRET}:latest,TISSUES_TISSUES_AUTH_CLIENT_SECRET=${CLIENT_SECRET}:latest,TISSUES_TISSUES_AUTH_SESSION_SECRET=${SESSION_SECRET}:latest"
+PRODUCTION_ACCESS_FLAG="--allow-unauthenticated"
+if [[ "${FIRST_DEPLOYMENT}" == true ]]; then
+  PRODUCTION_ACCESS_FLAG="--no-allow-unauthenticated"
+fi
 
 echo "Deploying the fully configured production revision..."
 if ! gcloud run deploy "${SERVICE_NAME}" \
@@ -262,13 +279,18 @@ if ! gcloud run deploy "${SERVICE_NAME}" \
   --image="${IMAGE_URI}" \
   --service-account="${RUNTIME_SERVICE_ACCOUNT}" \
   --no-traffic \
-  --allow-unauthenticated \
+  "${PRODUCTION_ACCESS_FLAG}" \
   --set-env-vars="${NON_SECRET_ENV}" \
   --update-secrets="${SECRET_ENV}" \
   --quiet; then
-  echo "The fully configured production revision failed; existing traffic was not changed." >&2
+  if [[ "${FIRST_DEPLOYMENT}" == true ]]; then
+    echo "The private bootstrap remains serving; the fully configured production revision failed." >&2
+  else
+    echo "The fully configured production revision failed; existing production traffic was not changed." >&2
+  fi
   exit 1
 fi
+PRODUCTION_REVISION_DEPLOYED=true
 
 if ! gcloud run services update-traffic "${SERVICE_NAME}" \
   --project="${PROJECT_ID}" \
@@ -276,8 +298,27 @@ if ! gcloud run services update-traffic "${SERVICE_NAME}" \
   --platform=managed \
   --to-latest \
   --quiet; then
-  echo "The production revision is ready, but explicit traffic promotion failed; serving traffic was not changed." >&2
+  if [[ "${FIRST_DEPLOYMENT}" == true ]]; then
+    echo "The production revision is ready at 0% traffic, but promotion failed; the private bootstrap remains serving." >&2
+  else
+    echo "The production revision is ready at 0% traffic, but promotion failed; existing production traffic was not changed." >&2
+  fi
   exit 1
+fi
+PRODUCTION_PROMOTED=true
+
+if [[ "${FIRST_DEPLOYMENT}" == true ]]; then
+  echo "Enabling public invocation after production traffic promotion..."
+  if ! gcloud run services add-iam-policy-binding "${SERVICE_NAME}" \
+    --project="${PROJECT_ID}" \
+    --region="${REGION}" \
+    --member="allUsers" \
+    --role="roles/run.invoker" \
+    --quiet; then
+    echo "The production revision was promoted, but public invocation enablement failed; the service remains private." >&2
+    exit 1
+  fi
+  PUBLIC_ACCESS_ENABLED=true
 fi
 FINAL_DEPLOY_COMPLETE=true
 
