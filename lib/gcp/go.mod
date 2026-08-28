@@ -4,8 +4,6 @@ go 1.25.3
 
 require (
 	github.com/tedla-brandsema/tissues/lib/core v0.0.0
-	github.com/tedla-brandsema/tissues/lib/fio v0.0.0
-	github.com/tedla-brandsema/tissues/lib/tmpl v0.0.0
 	google.golang.org/api v0.247.0
 )
 

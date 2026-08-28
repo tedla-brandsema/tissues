@@ -8,6 +8,7 @@ require (
 	github.com/tedla-brandsema/tissues/lib/core v0.0.0
 	github.com/tedla-brandsema/tissues/lib/gcp v0.0.0
 	github.com/tedla-brandsema/tissues/lib/service v0.0.0
+	google.golang.org/api v0.247.0
 )
 
 require (
@@ -23,8 +24,6 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.6 // indirect
 	github.com/googleapis/gax-go/v2 v2.15.0 // indirect
 	github.com/tedla-brandsema/tagex v0.5.0 // indirect
-	github.com/tedla-brandsema/tissues/lib/fio v0.0.0 // indirect
-	github.com/tedla-brandsema/tissues/lib/tmpl v0.0.0 // indirect
 	github.com/tedla-brandsema/valex v0.3.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.61.0 // indirect
@@ -40,7 +39,6 @@ require (
 	golang.org/x/sys v0.35.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
-	google.golang.org/api v0.247.0 // indirect
 	google.golang.org/genproto v0.0.0-20250603155806-513f23925822 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250818200422-3122310a409c // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250811230008-5f3141c8851a // indirect

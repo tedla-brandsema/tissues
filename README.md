@@ -46,6 +46,34 @@ the repository. The launcher uses the persistent Project-era tissues namespace
 `tissues-dogfood-projects`; the pre-Project `tissues-dogfood` namespace is
 left untouched.
 
+## Deploy to Cloud Run
+
+Build the complete Linux/amd64 application binary locally:
+
+```sh
+./build.sh
+```
+
+Deploy the resulting `build/server` artifact with:
+
+```sh
+./deploy.sh
+```
+
+Cloud Build receives only the prebuilt binary and its minimal Dockerfile; repository
+source is not submitted to Cloud Build. On first deployment, provide the existing
+Identity Platform API key through the local environment so it can be initialized in
+Secret Manager without placing it on a command line or in a repository file:
+
+```sh
+export TISSUES_IDENTITY_API_KEY='...'
+./deploy.sh
+```
+
+Later deployments reuse the existing Secret Manager value and do not require the key
+locally. The deployment uses `tissues-dev`, `europe-west4`, the `containers` Artifact
+Registry repository, and the `tissues` Cloud Run service.
+
 During pre-deployment Project/Issue product iteration, current
 `tissues-dogfood-projects` data may be intentionally reset instead of migrated;
 the namespace itself remains the persistent shared dogfood target.
