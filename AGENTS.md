@@ -1,96 +1,83 @@
 # Working on tissues
 
-Development instructions for agents (and humans) changing this codebase.
+Development instructions for people and agents changing this repository.
 
-This file is about *building* tissues. It is not documentation for agents
-*using* tissues; that will live in MCP tool descriptions and product docs.
+## Structure
 
-## What tissues is
+- `app/` contains executable composition roots. Keep configuration and wiring
+  there; domain and reusable infrastructure do not belong there.
+- `lib/` contains reusable infrastructure. Dependencies must remain explicit;
+  do not introduce a service locator, dependency-injection framework, or
+  speculative abstraction.
+- Use the standard library where practical, including `http.ServeMux` for HTTP
+  routing and `log/slog` for logging.
+- Every deployable service owns its frontend beneath
+  `app/.../<service>/frontend`. Shared frontend components and tooling belong
+  under `lib/frontend`; service frontends consume them. There is no global SPA
+  that owns all services. The planned stack is React, shadcn/ui, and Tailwind
+  CSS, but do not introduce it before its implementation slice.
 
-An embarrassingly simple issue tracker whose canonical data is ordinary
-Markdown files in an ordinary Git repository. Humans and agents share it.
+## Product boundaries
 
-Layering, top to bottom:
+- The active implementation is GCP-native. The prior Git storage behavior is
+  historical and belongs only to `archive/git-backed-v0`.
+- Do not transplant source-product concepts or generic page/content models.
+- Slice A contains infrastructure and a bootstrap only. Do not infer unbuilt
+  Issue, Comment, browser, REST, MCP, or persistence behavior from it.
+- Once the domain arrives, there is exactly one Issue type. Relationships are
+  data, not an Epic/Story/Task taxonomy.
+- The first product is one shared issue workspace. Authentication identifies
+  the actor; it does not partition issue data or create a Workspace/Tenant
+  domain object.
+- Markdown remains the intended canonical rich-text representation. Do not
+  persist trusted client HTML or choose an editor without an explicit task.
 
-```
-REST (software clients)   browser UI (humans)   MCP (agents)
-                  \              |              /
-                   service layer          <- owns all issue/comment semantics
-                          |
-              Markdown repository layer   <- internal/store
-                          |
-                       git CLI
-```
+## Engineering rules
 
-REST and MCP are thin adapters over one service layer. There is never a
-separate REST semantic and MCP semantic. New behaviour goes in the service,
-not in an adapter.
-
-## Rules
-
-- Go is the implementation language.
-- **Simplicity is a hard requirement.** Prefer boring, explicit code. Reject
-  abstractions whose only justification is "we may need this later".
-- Do not expand v0 scope speculatively. The only domain objects are Issue and
-  Comment. If a task seems to need more, stop and say so instead.
-- Every issue is the same type. Its optional attachment to another issue is
-  mutable; containment is a relationship, not an Epic/Story/Task taxonomy.
-- Canonical issue data is Markdown on disk. The filesystem is the state;
-  there is no cache and no index.
-- Use the standard library where practical. Third-party dependencies are
-  added only when a task concretely requires one (currently: the official Go
-  MCP SDK; Goldmark is reserved for implemented rendering work).
-- Do not add queues, workflow engines, labels, priorities, assignment,
-  databases, JavaScript frameworks, Git libraries, or GitHub API integration
-  unless a later task explicitly asks for them.
-- Git is reached through the installed `git` CLI, never through a library.
+- Simplicity is a hard requirement. Add abstractions only for concrete current
+  behavior.
+- Keep executable wiring thin and shared infrastructure focused.
+- Config structs are authoritative. Application and service code must not call
+  `os.Getenv` for normal configuration; `lib/core/config` alone owns source
+  resolution. Precedence is always defaults, profile, environment, then
+  explicit CLI.
+- Profiles are immutable snapshots. Fully resolve and validate a candidate
+  before atomic replacement. An invalid reload must never alter the active
+  profile, and service-profile replacement must not mutate unrelated outer
+  application/server configuration.
+- Mark and redact secrets. Never put secret values in diagnostics, provenance,
+  errors, or logs.
+- A service receives its typed sub-configuration, not the entire application
+  configuration.
+- Every service must contribute a typed configuration struct. A service with no
+  configurable fields contributes an explicit empty config contribution.
+  Service code must not source configuration outside that contribution.
+- A service observes configuration through its typed Profile/Slot handle, not
+  the complete application configuration.
+- Auth is a separate service. Each relying service may enable or disable it
+  independently. Browser auth must return to the exact original safe local URL.
+- Never commit credentials, project-specific secrets, API keys, or development
+  credential fallbacks. Deployed cookies are secure by default.
+- Use `slog`; do not add an alternate logging library.
+- Tests must exercise production behavior, use ephemeral listeners where
+  practical, and report construction errors rather than hiding them.
+- Do not commit or push unless a task explicitly requests it.
 
 ## Before reporting completion
 
-```
-gofmt -l .        # must print nothing
+Run the following from every retained module root:
+
+```sh
+gofmt -l .
 go vet ./...
 go test ./...
+go test -count=1 -shuffle=on ./...
+go mod verify
 ```
 
-Do not commit or push unless the task explicitly asks for it.
+From the workspace root, also run:
 
-## Where things live
-
-- `docs/SPEC.md` — the v0 specification. It describes only what is
-  implemented. Keep it in step with the code; do not add roadmap material.
-- `internal/model` — domain types and their invariants. Knows nothing about
-  Markdown or the filesystem.
-- `internal/store` — canonical Markdown serialization, strict parsing,
-  validation and filesystem layout.
-- `internal/gitcli` — a narrow wrapper around the `git` executable. Keep it
-  narrow: it exists only to support the service transaction.
-- `internal/service` — the one application service. Every issue and comment
-  operation lives here.
-- `internal/rest` — the HTTP transport adapter. REST is a transport adapter;
-  issue and comment semantics stay in `internal/service`. Transport JSON
-  shapes live here so `internal/model` carries no JSON tags.
-- `internal/mcpserver` — the MCP transport adapter. Its nine tools map
-  directly to service operations; MCP representations and schema concerns
-  stay here, and domain semantics stay in `internal/service`.
-- `internal/webui` — the server-rendered browser adapter. Templates, safe
-  Markdown rendering, form transport concerns and browser security stay here.
-- `cmd/tissues` — the `tissues serve` executable. Flags only; it adds no Git
-  or domain behaviour of its own.
-
-Two rules in the service are load-bearing, not stylistic:
-
-- It never retains a `store.Tree` between calls. Every operation loads fresh
-  filesystem state under the mutex, which is what makes a restarted process
-  identical to a running one.
-- Every mutation requires a clean working tree and index, and stages exact
-  paths. `git add .` must never appear.
-- Moving an issue must preserve its complete subtree and directory basename,
-  reject cycles, and stage both the old and new directory paths exactly.
-- REST, MCP and the web UI in one served repository must share the same
-  `*service.Service`; never construct per-adapter services with separate mutexes.
-- Only output from Goldmark's default safe renderer may become `template.HTML`;
-  never enable `html.WithUnsafe` or trust arbitrary strings as HTML.
-- Browser mutation forms require a same-origin loopback `Origin`.
-- The HTTP listener defaults to loopback. v0 has no authentication and the
-  process may hold Git push credentials, so do not change that default.
+```sh
+gofmt -l app lib
+git diff --check
+```

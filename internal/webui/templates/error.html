@@ -1,8 +1,0 @@
-{{define "error.html"}}{{template "header" .Title}}
-<section class="error-page">
-  <p class="error-code">Error</p>
-  <h1>{{.Title}}</h1>
-  <p>{{.Message}}</p>
-  {{if .ActionURL}}<p><a href="{{.ActionURL}}">{{.ActionText}}</a></p>{{end}}
-</section>
-{{template "footer" .}}{{end}}

@@ -1,0 +1,23 @@
+go 1.25.3
+
+use (
+	./app/gcp/auth
+	./app/gcp/tissues
+	./lib/auth
+	./lib/core
+	./lib/fio
+	./lib/gcp
+	./lib/service
+	./lib/tmpl
+)
+
+replace (
+	github.com/tedla-brandsema/tissues/app/gcp/auth v0.0.0 => ./app/gcp/auth
+	github.com/tedla-brandsema/tissues/app/gcp/tissues v0.0.0 => ./app/gcp/tissues
+	github.com/tedla-brandsema/tissues/lib/auth v0.0.0 => ./lib/auth
+	github.com/tedla-brandsema/tissues/lib/core v0.0.0 => ./lib/core
+	github.com/tedla-brandsema/tissues/lib/fio v0.0.0 => ./lib/fio
+	github.com/tedla-brandsema/tissues/lib/gcp v0.0.0 => ./lib/gcp
+	github.com/tedla-brandsema/tissues/lib/service v0.0.0 => ./lib/service
+	github.com/tedla-brandsema/tissues/lib/tmpl v0.0.0 => ./lib/tmpl
+)

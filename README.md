@@ -1,172 +1,63 @@
-# tissues
+# 🤧 tissues
 
-tissues is an embarrassingly simple Git-backed Markdown issue tracker for
-humans and agents.
+GCP-native issue tracking for humans and agents.
 
-Issues and comments are ordinary Markdown files in an ordinary Git
-repository. tissues adds only the things Git does not: immutable IDs, domain
-timestamps, open/closed state, containment, comment ordering, and browser,
-REST and MCP interfaces over all of it. Git keeps the history, the replication
-and the remotes.
+This repository is a Go workspace organized into:
+
+- `app/`: executable application composition roots.
+- `lib/`: reusable infrastructure shared by applications.
+
+The current executables are `app/gcp/tissues`, the bootstrap product service,
+and `app/gcp/auth`, the separate Identity Platform authentication broker. The
+published Git-backed v0 is parked at `archive/git-backed-v0`; the active
+implementation is now GCP-native.
 
 ## Build
 
-```bash
-go build -o tissues ./cmd/tissues
+```sh
+go build ./app/gcp/tissues
+go build ./app/gcp/auth
 ```
 
-The MCP interface uses the official Go MCP SDK.
+## Configuration
 
-## Prepare an issue repository
-
-tissues does not create repositories, and it does not manage Git
-credentials. Point it at a Git repository you already control — usually a
-clone:
-
-```bash
-git clone git@github.com:you/my-issues.git
-```
-
-Or start one from scratch:
-
-```bash
-mkdir my-issues
-cd my-issues
-git init -b main
-git remote add origin git@github.com:you/my-issues.git
-```
-
-A repository with no `issues/` directory is valid and starts fine; the first
-issue creates it.
-
-## Run
-
-```bash
-./tissues serve -repo /path/to/my-issues
-```
-
-Flags:
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `-repo` | `.` | Git repository holding the tissues data |
-| `-addr` | `127.0.0.1:8080` | Address to listen on |
-| `-remote-sync` | `true` | Pull before and push after every change |
-
-With `-remote-sync=true` (the default), each change runs `git pull --ff-only`
-before the mutation and `git push` after it, using whatever Git credentials
-the tissues process already has. On the very first change in a fresh
-repository it runs `git push --set-upstream origin HEAD`.
-
-For local-only commits, with no remote contact at all:
-
-```bash
-./tissues serve -repo /path/to/my-issues -remote-sync=false
-```
-
-Every change requires a clean working tree and index. tissues will refuse to
-run while you have unrelated uncommitted work in that repository, so it can
-never sweep your changes into its commits.
-
-## Browser
-
-Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) after starting the
-server. The compact workspace keeps an Open/Closed/All issue navigator beside
-the selected issue, safely renders Markdown, and supports editing, discussion,
-and title-based attachment without copying IDs. A small embedded script handles
-dialogs, disclosure controls, and chooser filtering; mutations remain ordinary
-same-origin forms handled by the shared service.
-
-## REST
-
-```bash
-# list the whole issue hierarchy
-curl -s localhost:8080/api/issues
-
-# create an issue (parent_id is optional)
-curl -s -X POST localhost:8080/api/issues \
-  -d '{"title":"Fix token refresh","description":"It expires early."}'
-
-# comment on it
-curl -s -X POST localhost:8080/api/issues/$ID/comments \
-  -d '{"author":"you@example","body":"I reproduced this."}'
-
-# close it
-curl -s -X POST localhost:8080/api/issues/$ID/close
-
-# attach it beneath another issue, or use "" to detach
-curl -s -X PUT localhost:8080/api/issues/$ID/parent \
-  -d '{"parent_id":"'$OTHER_ID'"}'
-```
-
-The route set covers nine service operations: list, create, get, update, move,
-close, reopen, add a comment, and edit a comment. See `docs/SPEC.md` for the
-request and response shapes and the error codes.
-
-One note worth knowing before you write a client: a `502` with
-`"code": "not_pushed"` means the change **was** committed to your local Git
-repository and only the push to the remote failed. Do not retry the request —
-the issue or comment already exists. Fix the remote and the next change
-publishes the backlog.
-
-## MCP
-
-The same server exposes the nine service operations as MCP tools over
-Streamable HTTP:
+Typed Go `Config` structs are the configuration schema. A named `Profile[T]`
+is a resolved, validated, revisioned instance of that type. Values resolve in
+one fixed order:
 
 ```text
-http://127.0.0.1:8080/mcp
+defaults < named profile < environment < explicit CLI flags
 ```
 
-The tools are `list_issues`, `get_issue`, `create_issue`, `update_issue`,
-`move_issue`, `close_issue`, `reopen_issue`, `add_comment`, and `edit_comment`.
-Issues are one type: `move_issue` changes only the optional attachment, and an
-empty `parent_id` detaches to the top level. MCP and REST share one service and
-one repository, so agents and humans see the same hierarchy and comments.
-There is no stdio mode.
+Choose a profile with `--profile NAME` and its directory with
+`--profiles DIRECTORY`; defaults are `default` and `./profiles`. The equivalent
+bootstrap variables are `<PREFIX>_PROFILE` and `<PREFIX>_PROFILES`, with CLI
+taking precedence. A missing profile file is allowed when defaults and
+overrides are sufficient. File profiles are strict `.json`, `.yaml`, or `.yml`
+documents; unknown fields and ambiguous same-name extensions are rejected.
 
-An MCP tool result marked as an error because a push failed still carries the
-committed issue or comment as structured output. Its warning says that the
-mutation exists locally and must not be blindly repeated.
+File, environment, and flag names derive from the same field path. For example,
+`Service.Auth.BrokerURL` becomes `service.auth.broker_url`,
+`TISSUES_SERVICE_AUTH_BROKER_URL`, and `--service-auth-broker-url`. Run either
+executable with `--help` to inspect its generated field flags. Cloud Run's
+special bare `PORT` name is declared on `service.Config.Port` as a narrow source
+override; the default port is 8080.
 
-## Safety
+An application profile composes stable HTTP server settings with a mandatory
+typed configuration contribution from every service, including an explicit
+empty contribution when a service has no settings. The tissues service profile
+is held separately so accepted live fields can be replaced without mutating
+server configuration;
+restart-tagged changes are explicitly reported as requiring reconstruction.
 
-**v0 has no HTTP authentication.** This applies to the browser UI, REST and
-MCP. The default listener is loopback-only. Browser mutation forms additionally
-require a same-origin loopback `Origin`; this prevents a foreign webpage from
-submitting an ordinary form to a local tissues process, but it is not
-authentication. Do not expose the server directly to an untrusted network:
-anyone who can reach the port can create, edit and close issues through REST or
-MCP, and can cause the process to push to your Git remote with its credentials.
+Tissues auth is optional. With `service.auth.enabled: false`, browser traffic
+passes through. When enabled, tissues acts as a relying party for the separately
+deployable central auth service and requires its broker URL, client credentials,
+redirect URI, and session secret. Cookies are secure unless local development
+explicitly opts into insecure cookies.
 
-## Canonical storage
-
-The truth is the Markdown, not the server. After the calls above:
-
-```bash
-$ git -C my-issues log --oneline
-9f2c1ab comment mfz4x... on issue k7qd2...
-3e81b40 create issue k7qd2...: Fix token refresh
-
-$ cat my-issues/issues/k7qd2*/issue.md
-# Fix token refresh
-
-<!-- tissues:issue:v0 -->
-- **ID:** `k7qd2...`
-- **State:** open
-- **Created:** 2026-08-23T13:20:11Z
-- **Updated:** 2026-08-23T13:20:11Z
-
----
-
-It expires early.
-```
-
-Nothing is cached and nothing is indexed. Point tissues at a fresh clone of
-the same repository and it reconstructs identical state, because the files
-are the state.
-
-## Not implemented in v0
-
-There is no authentication, assignment, labels, priorities, queues, workflow,
-or search.
+Fields tagged as secrets are redacted from provenance and diagnostics. Profile
+files can technically contain them, but deployed profiles should inject secrets
+from an external secret delivery mechanism. Secret Manager integration is not
+part of this slice. Environment variables and CLI flags are intended as
+overrides, not as a hand-maintained primary configuration schema.
