@@ -9,6 +9,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@milkdown/crepe": "7.22.1",
+    "@milkdown/kit": "7.22.1",
+    "@milkdown/react": "7.22.1",
     "@tissues/frontend": "*",
     "lucide-react": "1.35.0",
     "react": "19.2.8",

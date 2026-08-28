@@ -74,6 +74,9 @@ Development instructions for people and agents changing this repository.
 - Use `slog`; do not add an alternate logging library.
 - Tests must exercise production behavior, use ephemeral listeners where
   practical, and report construction errors rather than hiding them.
+- Browser-visible interaction semantics must not be considered qualified solely
+  by jsdom/component tests. User-critical browser contracts require Playwright
+  coverage, with Firefox and Chromium for tissues.
 - When frontend source changes, regenerate and stage the corresponding embedded
   frontend output. For tissues, `npm run build` refreshes
   `services/tissues/frontend/generated`.

@@ -184,7 +184,7 @@ func TestTransactionRetriesReuseLogicalIDAndTimestamp(t *testing.T) {
 
 func testService(t *testing.T, repo Repository) *Service {
 	t.Helper()
-	profile, err := config.NewServiceProfile("test", Config{Enabled: true, Storage: StorageConfig{ProjectID: "example", Namespace: "test"}, Message: "🤧 tissues"})
+	profile, err := config.NewServiceProfile("test", Config{Enabled: true, Storage: StorageConfig{ProjectID: "example", Namespace: "test"}})
 	if err != nil {
 		t.Fatal(err)
 	}

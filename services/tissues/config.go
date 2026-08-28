@@ -11,8 +11,7 @@ import (
 // Config is the complete typed contribution for one tissues Service.
 type Config struct {
 	service.Contribution
-	Enabled bool   `cfg:"bool,default=true,restart=true"`
-	Message string `cfg:"string,default=🤧 tissues"`
+	Enabled bool `cfg:"bool,default=true,restart=true"`
 	Storage StorageConfig
 	Auth    AuthConfig
 }

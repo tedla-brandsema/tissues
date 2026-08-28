@@ -30,3 +30,7 @@ yarn-error.log*
 
 # Local generated architecture/graph analysis
 /graphify-out/
+
+# Local browser-test artifacts
+/playwright-report/
+/test-results/

@@ -23,7 +23,7 @@ func TestAuthDisabledServesGeneratedWorkspaceAndAssets(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/?view=open&selected=abc", nil))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id="root"`) || !strings.Contains(rec.Body.String(), "🤧 tissues") {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id="root"`) {
 		t.Fatalf("response=%d %q", rec.Code, rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), `name="tissues-auth-enabled" content="false"`) || !strings.Contains(rec.Body.String(), `name="tissues-author" content=""`) {
@@ -64,7 +64,7 @@ func TestAuthEnabledPreservesExactOriginalRequestURI(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}
-	cfg := Config{Enabled: true, Message: "tissues", Storage: StorageConfig{ProjectID: "example", Namespace: "test"}, Auth: AuthConfig{Enabled: true, BrokerURL: brokerURL, ClientID: "tissues", ClientSecret: "client-secret", RedirectURI: "http://tissues.example.test/tissues/auth/callback", SessionSecret: "01234567890123456789012345678901", InsecureCookie: true}}
+	cfg := Config{Enabled: true, Storage: StorageConfig{ProjectID: "example", Namespace: "test"}, Auth: AuthConfig{Enabled: true, BrokerURL: brokerURL, ClientID: "tissues", ClientSecret: "client-secret", RedirectURI: "http://tissues.example.test/tissues/auth/callback", SessionSecret: "01234567890123456789012345678901", InsecureCookie: true}}
 	profile, err := config.NewServiceProfile("test", cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +161,7 @@ func TestAuthenticatedBootstrapPrefersEmail(t *testing.T) {
 func TestServiceProfileReloadDoesNotMutateOuterServerConfig(t *testing.T) {
 	ctx := context.Background()
 	store := config.NewMemoryStore()
-	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"message":"one","storage":{"project_id":"example","namespace":"test"}}`)})
+	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"storage":{"project_id":"example","namespace":"one"}}`)})
 	manager, err := config.NewManager[Config](ctx, config.LoadOptions{Name: "demo", Prefix: "TISSUES_SERVICE", Store: store})
 	if err != nil {
 		t.Fatal(err)
@@ -175,20 +175,15 @@ func TestServiceProfileReloadDoesNotMutateOuterServerConfig(t *testing.T) {
 	if err := svc.RegisterRoutes(mux); err != nil {
 		t.Fatal(err)
 	}
-	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"message":"two","storage":{"project_id":"example","namespace":"test"}}`)})
+	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"storage":{"project_id":"example","namespace":"two"}}`)})
 	result, err := manager.Reload(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Profile.Revision != 2 || outerPort != 8080 {
+	if result.Profile.Revision != 2 || result.Profile.Config.Storage.Namespace != "two" || outerPort != 8080 {
 		t.Fatalf("reload=%#v outerPort=%d", result, outerPort)
 	}
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	if !strings.Contains(rec.Body.String(), "two") {
-		t.Fatalf("body=%q", rec.Body.String())
-	}
-	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"message":"bad"}`)})
+	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true}`)})
 	if _, err := manager.Reload(ctx); err == nil {
 		t.Fatal("invalid reload accepted")
 	}

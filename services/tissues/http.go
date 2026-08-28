@@ -62,7 +62,6 @@ func (s *Service) browserRootHandler(frontend fs.FS, authEnabled bool) http.Hand
 			author = trustedAuthor(r)
 		}
 		replacer := strings.NewReplacer(
-			"__TISSUES_MESSAGE__", html.EscapeString(s.profile.Current().Config.Message),
 			"__TISSUES_AUTH_ENABLED__", fmt.Sprintf("%t", authEnabled),
 			"__TISSUES_AUTHOR__", html.EscapeString(author),
 		)

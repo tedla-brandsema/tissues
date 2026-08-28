@@ -27,7 +27,11 @@ npm install
 npm test
 npm run typecheck
 npm run build
+npm run e2e
 ```
+
+The Playwright suite qualifies user-critical browser contracts in both Firefox
+and Chromium against deterministic local frontend fixtures.
 
 To run both Services locally against the shared `tissues-dev` Identity Platform
 and Datastore development resources, supply the development Identity Platform

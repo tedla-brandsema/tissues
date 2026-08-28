@@ -10,6 +10,12 @@
   "scripts": {
     "build": "npm run build --workspace @tissues/auth-frontend && npm run build --workspace @tissues/workspace",
     "test": "npm run test --workspace @tissues/auth-frontend && npm run test --workspace @tissues/workspace",
-    "typecheck": "npm run typecheck --workspace @tissues/auth-frontend && npm run typecheck --workspace @tissues/workspace"
+    "typecheck": "npm run typecheck --workspace @tissues/auth-frontend && npm run typecheck --workspace @tissues/workspace",
+    "e2e": "playwright test",
+    "e2e:chromium": "playwright test --project=chromium",
+    "e2e:firefox": "playwright test --project=firefox"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
   }
 }

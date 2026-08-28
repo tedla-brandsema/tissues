@@ -4,6 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { UnauthorizedError } from "./api";
 
+vi.mock("./MarkdownEditor", () => ({
+  MarkdownEditor: ({ label, value, onChange }: { label: string; value: string; onChange: (markdown: string) => void }) => <label>{label}<textarea aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} /></label>,
+}));
+
 const issue = { id: "parent", title: "Parent", state: "open", created: "2026-01-01T00:00:00.123456789Z", updated: "2026-01-01T00:00:00.123456789Z", description: "# Safe Markdown\n\n<script>alert(1)</script>", parent_id: "", comments: [], children: [{ id: "child", title: "Child", state: "closed", created: "2026-01-01T00:00:00Z", updated: "2026-01-01T00:00:00Z", description: "child", parent_id: "parent", comments: [], children: [] }] };
 let requests: Array<{ path: string; method: string; body: string }> = [];
 
@@ -35,7 +39,7 @@ describe("workspace", () => {
 
   it("opens the create workflow and persists the comment author", async () => {
     const user = userEvent.setup(); render(<App />);
-    await user.click(screen.getByRole("button", { name: /new issue/i }));
+    await user.click(within(screen.getByLabelText("Issue navigator")).getByRole("button", { name: /new issue/i }));
     expect(screen.getByRole("dialog")).toHaveTextContent("Create issue");
     await user.type(screen.getByLabelText("Title"), "Created"); await user.type(screen.getByLabelText("Description"), "Body");
     await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Save" }));
