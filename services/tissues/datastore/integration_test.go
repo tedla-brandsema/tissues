@@ -1,8 +1,13 @@
 package datastore_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -12,6 +17,157 @@ import (
 	"github.com/tedla-brandsema/tissues/services/tissues"
 	tissuesds "github.com/tedla-brandsema/tissues/services/tissues/datastore"
 )
+
+type apiIssue struct {
+	ID       string        `json:"id"`
+	Title    string        `json:"title"`
+	State    tissues.State `json:"state"`
+	ParentID string        `json:"parent_id"`
+	Children []apiIssue    `json:"children"`
+	Comments []apiComment  `json:"comments"`
+}
+
+type apiComment struct{ ID, Author, Body string }
+
+func TestRealHTTPDatastoreDogfood(t *testing.T) {
+	if os.Getenv("TISSUES_GCP_INTEGRATION") != "1" {
+		t.Skip("set TISSUES_GCP_INTEGRATION=1 for real Datastore test")
+	}
+	project := strings.TrimSpace(os.Getenv("TISSUES_GCP_TEST_PROJECT"))
+	if project == "" {
+		t.Fatal("TISSUES_GCP_TEST_PROJECT is required")
+	}
+	ctx := context.Background()
+	client, err := gcds.NewClient(ctx, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	suffix, err := tissues.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	namespace := "tissues-http-it-" + suffix[:12]
+	t.Logf("HTTP integration namespace: %s", namespace)
+	defer cleanupNamespace(t, ctx, client, namespace)
+	repo, err := tissuesds.New(client, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := config.NewServiceProfile("http-integration", tissues.Config{Enabled: true, Storage: tissues.StorageConfig{ProjectID: project, Namespace: namespace}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot, err := config.NewSlot(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := tissues.New(slot, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	if err := svc.RegisterRoutes(mux); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	a := apiCreate(t, server.URL, "A", "alpha")
+	b := apiCreate(t, server.URL, "B", "beta")
+	c := apiCreate(t, server.URL, "C", "gamma")
+	var list struct {
+		Issues []apiIssue `json:"issues"`
+	}
+	apiCall(t, server.URL, http.MethodGet, "/api/tissues/v1/issues", nil, http.StatusOK, &list)
+	if len(list.Issues) != 3 {
+		t.Fatalf("list count=%d", len(list.Issues))
+	}
+	var got apiIssue
+	apiCall(t, server.URL, http.MethodGet, "/api/tissues/v1/issues/"+b.ID, nil, http.StatusOK, &got)
+	if got.ID != b.ID {
+		t.Fatalf("get=%#v", got)
+	}
+	apiCall(t, server.URL, http.MethodPut, "/api/tissues/v1/issues/"+b.ID+"/parent", map[string]string{"parent_id": a.ID}, http.StatusOK, &got)
+	if got.ParentID != a.ID {
+		t.Fatalf("attach=%#v", got)
+	}
+	apiCall(t, server.URL, http.MethodPut, "/api/tissues/v1/issues/"+b.ID+"/parent", map[string]string{"parent_id": c.ID}, http.StatusOK, &got)
+	if got.ParentID != c.ID {
+		t.Fatalf("move=%#v", got)
+	}
+	apiCall(t, server.URL, http.MethodPut, "/api/tissues/v1/issues/"+b.ID+"/parent", map[string]string{"parent_id": ""}, http.StatusOK, &got)
+	if got.ParentID != "" {
+		t.Fatalf("detach=%#v", got)
+	}
+	apiCall(t, server.URL, http.MethodPut, "/api/tissues/v1/issues/"+b.ID+"/parent", map[string]string{"parent_id": a.ID}, http.StatusOK, &got)
+	var comment apiComment
+	apiCall(t, server.URL, http.MethodPost, "/api/tissues/v1/issues/"+b.ID+"/comments", map[string]string{"author": "integration-agent", "body": "first"}, http.StatusCreated, &comment)
+	if comment.Author != "integration-agent" {
+		t.Fatalf("comment=%#v", comment)
+	}
+	apiCall(t, server.URL, http.MethodPatch, "/api/tissues/v1/issues/"+b.ID+"/comments/"+comment.ID, map[string]string{"body": "edited"}, http.StatusOK, &comment)
+	if comment.Body != "edited" {
+		t.Fatalf("edit=%#v", comment)
+	}
+	apiCall(t, server.URL, http.MethodPost, "/api/tissues/v1/issues/"+b.ID+"/close", struct{}{}, http.StatusOK, &got)
+	if got.State != tissues.StateClosed {
+		t.Fatalf("close=%#v", got)
+	}
+	apiCall(t, server.URL, http.MethodPost, "/api/tissues/v1/issues/"+b.ID+"/reopen", struct{}{}, http.StatusOK, &got)
+	if got.State != tissues.StateOpen {
+		t.Fatalf("reopen=%#v", got)
+	}
+	apiCall(t, server.URL, http.MethodPut, "/api/tissues/v1/issues/"+b.ID+"/parent", map[string]string{"parent_id": b.ID}, http.StatusBadRequest, nil)
+	apiCall(t, server.URL, http.MethodPut, "/api/tissues/v1/issues/"+a.ID+"/parent", map[string]string{"parent_id": b.ID}, http.StatusBadRequest, nil)
+	apiCall(t, server.URL, http.MethodGet, "/api/tissues/v1/issues/"+a.ID, nil, http.StatusOK, &got)
+	if len(got.Children) != 1 || got.Children[0].ID != b.ID {
+		t.Fatalf("canonical hierarchy=%#v", got)
+	}
+	t.Log("real HTTP API lifecycle and canonical JSON responses verified")
+}
+
+func apiCreate(t *testing.T, base, title, description string) apiIssue {
+	t.Helper()
+	var issue apiIssue
+	apiCall(t, base, http.MethodPost, "/api/tissues/v1/issues", map[string]string{"title": title, "description": description, "parent_id": ""}, http.StatusCreated, &issue)
+	return issue
+}
+
+func apiCall(t *testing.T, base, method, path string, payload any, want int, target any) {
+	t.Helper()
+	var body io.Reader
+	if payload != nil {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequest(method, base+path, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != want {
+		t.Fatalf("%s %s status=%d want=%d body=%s", method, path, response.StatusCode, want, raw)
+	}
+	if target != nil {
+		if err := json.Unmarshal(raw, target); err != nil {
+			t.Fatalf("%s %s decode: %v body=%s", method, path, err, raw)
+		}
+	}
+}
 
 func TestRealDatastoreDogfood(t *testing.T) {
 	if os.Getenv("TISSUES_GCP_INTEGRATION") != "1" {

@@ -1,0 +1,26 @@
+{
+  "name": "@tissues/frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    "./components/ui/*": "./src/components/ui/*.tsx",
+    "./lib/utils": "./src/lib/utils.ts",
+    "./styles.css": "./src/styles/globals.css"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "1.1.23",
+    "@radix-ui/react-scroll-area": "1.2.18",
+    "@radix-ui/react-separator": "1.1.15",
+    "@radix-ui/react-tabs": "1.1.21",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.35.0",
+    "react": "19.2.8",
+    "sonner": "2.0.8",
+    "tailwind-merge": "3.6.0"
+  },
+  "peerDependencies": {
+    "react-dom": "19.2.8"
+  }
+}

@@ -23,9 +23,9 @@ Development instructions for people and agents changing this repository.
 - Every Service contributes typed configuration and owns its service-specific
   frontend beneath `services/<service>/frontend`. Shared frontend
   components and tooling belong under `lib/frontend`; service frontends
-  consume them. There is no global SPA that owns all services. The planned
-  stack is React, shadcn/ui, and Tailwind CSS, but do not introduce it before
-  its implementation slice.
+  consume them. `lib/frontend` must contain only reusable primitives, theme,
+  and generic utilities; concrete domain types, API clients, routes, and views
+  remain with their Service. There is no global SPA that owns all services.
 
 ## Product boundaries
 
@@ -74,6 +74,9 @@ Development instructions for people and agents changing this repository.
 - Use `slog`; do not add an alternate logging library.
 - Tests must exercise production behavior, use ephemeral listeners where
   practical, and report construction errors rather than hiding them.
+- When frontend source changes, regenerate and stage the corresponding embedded
+  frontend output. For tissues, `npm run build` refreshes
+  `services/tissues/frontend/generated`.
 - `graphify-out/` is persistent local generated analysis state. It is
   intentionally Git-ignored. Graphify may create or refresh it, but agents must
   not delete it merely to obtain a clean Git working tree. Ignored generated
@@ -97,4 +100,12 @@ From the workspace root, also run:
 ```sh
 gofmt -l app services lib
 git diff --check
+```
+
+For frontend changes, also run:
+
+```sh
+npm test
+npm run typecheck
+npm run build
 ```

@@ -6,6 +6,7 @@ require (
 	cloud.google.com/go/datastore v1.21.0
 	github.com/tedla-brandsema/tissues/lib/auth v0.0.0
 	github.com/tedla-brandsema/tissues/lib/core v0.0.0
+	github.com/tedla-brandsema/tissues/lib/gcp v0.0.0
 	github.com/tedla-brandsema/tissues/lib/service v0.0.0
 )
 
@@ -23,7 +24,6 @@ require (
 	github.com/googleapis/gax-go/v2 v2.15.0 // indirect
 	github.com/tedla-brandsema/tagex v0.5.0 // indirect
 	github.com/tedla-brandsema/tissues/lib/fio v0.0.0 // indirect
-	github.com/tedla-brandsema/tissues/lib/gcp v0.0.0 // indirect
 	github.com/tedla-brandsema/tissues/lib/tmpl v0.0.0 // indirect
 	github.com/tedla-brandsema/valex v0.3.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect

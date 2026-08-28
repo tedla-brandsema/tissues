@@ -99,6 +99,19 @@ func TestRelyingPartyRejectsUnsafeNext(t *testing.T) {
 	}
 }
 
+func TestSessionMiddlewareDelegatesUnauthenticatedRequests(t *testing.T) {
+	rp := NewRP(RPConfig{Secret: []byte("test-only-secret")})
+	recorder := httptest.NewRecorder()
+	rp.SessionMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("protected handler called")
+	}), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api", nil))
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", recorder.Code)
+	}
+}
+
 type rpRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f rpRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

@@ -28,6 +28,9 @@ app/gcp/server
     +-- lib/service
     |       in-process Service SDK
     |
+    +-- lib/frontend
+    |       reusable source-owned UI primitives, theme, and utilities
+    |
     +-- services/auth
     |       +-- lib/auth/broker
     |       +-- lib/gcp/auth
@@ -35,6 +38,8 @@ app/gcp/server
     +-- services/tissues
             +-- tissues domain
             +-- tissues Datastore adapter
+            +-- same-origin /api/tissues/v1 JSON boundary
+            +-- frontend/ React workspace and embedded generated assets
 ```
 
 Concrete `services/*` implement `lib/service`; construction remains explicit in
@@ -64,7 +69,8 @@ does not mutate outer Server configuration.
 behavior, and `services/auth/frontend`. Reusable broker infrastructure remains
 in `lib/auth/broker`, and reusable GCP auth adapters remain in `lib/gcp/auth`.
 `services/tissues` owns the tissues contribution, Issue and Comment domain,
-repository contract, bootstrap routes, `services/tissues/frontend`, and its
+repository contract, same-origin JSON and browser routes,
+`services/tissues/frontend`, and its
 schema-specific Cloud Datastore adapter under `services/tissues/datastore`.
 
 Each relying Service controls authentication enforcement independently. When
@@ -88,6 +94,14 @@ children and comments are derived and deterministically sorted in Go. Domain
 timestamps are stored as Unix-nanosecond integers so Datastore's native
 timestamp precision cannot erase the required one-nanosecond comment ordering.
 
-Service-specific frontends live with their Service. Shared frontend facilities
-will live in `lib/frontend`; the planned stack is React, shadcn/ui, and Tailwind
-CSS, but that frontend implementation belongs to a later slice.
+Service-specific frontends live with their Service. `lib/frontend` owns only
+reusable shadcn-derived primitives, Tailwind theme/base styles, and generic
+utilities. `services/tissues/frontend` owns the concrete React application and
+API client. Vite emits committed assets beneath that Service for Go embedding;
+the Server composition root does not know their filesystem layout.
+
+The tissues browser JSON boundary is `/api/tissues/v1`. With authentication
+enabled, initial HTML navigation retains the relying-party login redirect and
+exact safe return URL, while unauthenticated API requests receive a structured
+JSON 401. Trusted request identity supplies Comment authors at this HTTP
+boundary; the domain remains provider-neutral.

@@ -58,10 +58,25 @@ func NewRP(cfg RPConfig) *RP {
 }
 
 func (rp *RP) Middleware(next http.Handler) http.Handler {
+	return rp.SessionMiddleware(next, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, withNext(rp.cfg.LoginPath, r), http.StatusSeeOther)
+	}))
+}
+
+// SessionMiddleware validates the relying-party session, adds its trusted
+// identity to the request context, and delegates missing or expired sessions
+// to unauthenticated. This lets browser pages redirect while JSON APIs return
+// an appropriate non-HTML response.
+func (rp *RP) SessionMiddleware(next, unauthenticated http.Handler) http.Handler {
+	if unauthenticated == nil {
+		unauthenticated = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		})
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sess, err := rp.readSession(r)
 		if err != nil {
-			http.Redirect(w, r, withNext(rp.cfg.LoginPath, r), http.StatusSeeOther)
+			unauthenticated.ServeHTTP(w, r)
 			return
 		}
 		ctx := gcpauth.WithSubject(r.Context(), sess.Subject)
