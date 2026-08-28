@@ -27,3 +27,6 @@ yarn-error.log*
 /platypus/
 **_debug*
 **data/
+
+# Local generated architecture/graph analysis
+/graphify-out/

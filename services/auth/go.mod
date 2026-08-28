@@ -1,10 +1,11 @@
-module github.com/tedla-brandsema/tissues/app/gcp/tissues
+module github.com/tedla-brandsema/tissues/services/auth
 
 go 1.25.3
 
 require (
+	cloud.google.com/go/datastore v1.21.0
 	github.com/tedla-brandsema/tissues/lib/auth v0.0.0
-	github.com/tedla-brandsema/tissues/lib/core v0.0.0
+	github.com/tedla-brandsema/tissues/lib/gcp v0.0.0
 	github.com/tedla-brandsema/tissues/lib/service v0.0.0
 )
 
@@ -13,7 +14,6 @@ require (
 	cloud.google.com/go/auth v0.16.4 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.8.0 // indirect
-	cloud.google.com/go/datastore v1.21.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -22,8 +22,8 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.6 // indirect
 	github.com/googleapis/gax-go/v2 v2.15.0 // indirect
 	github.com/tedla-brandsema/tagex v0.5.0 // indirect
+	github.com/tedla-brandsema/tissues/lib/core v0.0.0 // indirect
 	github.com/tedla-brandsema/tissues/lib/fio v0.0.0 // indirect
-	github.com/tedla-brandsema/tissues/lib/gcp v0.0.0 // indirect
 	github.com/tedla-brandsema/tissues/lib/tmpl v0.0.0 // indirect
 	github.com/tedla-brandsema/valex v0.3.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
@@ -49,10 +49,10 @@ require (
 )
 
 replace (
-	github.com/tedla-brandsema/tissues/lib/auth => ../../../lib/auth
-	github.com/tedla-brandsema/tissues/lib/core => ../../../lib/core
-	github.com/tedla-brandsema/tissues/lib/fio => ../../../lib/fio
-	github.com/tedla-brandsema/tissues/lib/gcp => ../../../lib/gcp
-	github.com/tedla-brandsema/tissues/lib/service => ../../../lib/service
-	github.com/tedla-brandsema/tissues/lib/tmpl => ../../../lib/tmpl
+	github.com/tedla-brandsema/tissues/lib/auth => ../../lib/auth
+	github.com/tedla-brandsema/tissues/lib/core => ../../lib/core
+	github.com/tedla-brandsema/tissues/lib/fio => ../../lib/fio
+	github.com/tedla-brandsema/tissues/lib/gcp => ../../lib/gcp
+	github.com/tedla-brandsema/tissues/lib/service => ../../lib/service
+	github.com/tedla-brandsema/tissues/lib/tmpl => ../../lib/tmpl
 )

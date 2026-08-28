@@ -6,21 +6,33 @@ Development instructions for people and agents changing this repository.
 
 - `app/` contains executable composition roots. Keep configuration and wiring
   there; domain and reusable infrastructure do not belong there.
-- `lib/` contains reusable infrastructure. Dependencies must remain explicit;
+- `services/` contains complete concrete in-process Services. Every concrete
+  Service implements the `lib/service` SDK and owns its typed configuration.
+- `lib/` contains reusable libraries and SDKs. Dependencies must remain explicit;
   do not introduce a service locator, dependency-injection framework, or
   speculative abstraction.
 - Use the standard library where practical, including `http.ServeMux` for HTTP
   routing and `log/slog` for logging.
-- Every deployable service owns its frontend beneath
-  `app/.../<service>/frontend`. Shared frontend components and tooling belong
-  under `lib/frontend`; service frontends consume them. There is no global SPA
-  that owns all services. The planned stack is React, shadcn/ui, and Tailwind
-  CSS, but do not introduce it before its implementation slice.
+- A Server is the process/deployment boundary; a Service is an in-process
+  component hosted by a Server. One Server can compose multiple Services.
+  Services do not own listeners, `PORT`, signals, or Cloud Run lifecycle.
+- `lib/server` is the Server/process runtime and does not define concrete
+  Service behavior. `lib/service` is the in-process Service SDK and does not
+  own listener or process lifecycle. Complete concrete Services do not belong
+  under `lib/`.
+- Every Service contributes typed configuration and owns its service-specific
+  frontend beneath `services/<service>/frontend`. Shared frontend
+  components and tooling belong under `lib/frontend`; service frontends
+  consume them. There is no global SPA that owns all services. The planned
+  stack is React, shadcn/ui, and Tailwind CSS, but do not introduce it before
+  its implementation slice.
 
 ## Product boundaries
 
 - The active implementation is GCP-native. The prior Git storage behavior is
   historical and belongs only to `archive/git-backed-v0`.
+- GCP deploys the Server application to Google Cloud Run. Do not introduce
+  GKE, Kubernetes, App Engine, or Compute Engine/VM deployment assumptions.
 - Do not transplant source-product concepts or generic page/content models.
 - Slice A contains infrastructure and a bootstrap only. Do not infer unbuilt
   Issue, Comment, browser, REST, MCP, or persistence behavior from it.
@@ -54,13 +66,18 @@ Development instructions for people and agents changing this repository.
   Service code must not source configuration outside that contribution.
 - A service observes configuration through its typed Profile/Slot handle, not
   the complete application configuration.
-- Auth is a separate service. Each relying service may enable or disable it
-  independently. Browser auth must return to the exact original safe local URL.
+- Auth is a separate internal Service. Each relying Service may enable or
+  disable enforcement independently. Browser auth must return to the exact
+  original safe local URL.
 - Never commit credentials, project-specific secrets, API keys, or development
   credential fallbacks. Deployed cookies are secure by default.
 - Use `slog`; do not add an alternate logging library.
 - Tests must exercise production behavior, use ephemeral listeners where
   practical, and report construction errors rather than hiding them.
+- `graphify-out/` is persistent local generated analysis state. It is
+  intentionally Git-ignored. Graphify may create or refresh it, but agents must
+  not delete it merely to obtain a clean Git working tree. Ignored generated
+  state is not a Git cleanliness violation.
 - Do not commit or push unless a task explicitly requests it.
 
 ## Before reporting completion
@@ -78,6 +95,6 @@ go mod verify
 From the workspace root, also run:
 
 ```sh
-gofmt -l app lib
+gofmt -l app services lib
 git diff --check
 ```

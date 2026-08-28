@@ -1,13 +1,14 @@
-module github.com/tedla-brandsema/tissues/app/gcp/auth
+module github.com/tedla-brandsema/tissues/app/gcp/server
 
 go 1.25.3
 
 require (
 	cloud.google.com/go/datastore v1.21.0
-	github.com/tedla-brandsema/tissues/lib/auth v0.0.0
 	github.com/tedla-brandsema/tissues/lib/core v0.0.0
-	github.com/tedla-brandsema/tissues/lib/gcp v0.0.0
+	github.com/tedla-brandsema/tissues/lib/server v0.0.0
 	github.com/tedla-brandsema/tissues/lib/service v0.0.0
+	github.com/tedla-brandsema/tissues/services/auth v0.0.0
+	github.com/tedla-brandsema/tissues/services/tissues v0.0.0
 )
 
 require (
@@ -23,7 +24,9 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.6 // indirect
 	github.com/googleapis/gax-go/v2 v2.15.0 // indirect
 	github.com/tedla-brandsema/tagex v0.5.0 // indirect
+	github.com/tedla-brandsema/tissues/lib/auth v0.0.0 // indirect
 	github.com/tedla-brandsema/tissues/lib/fio v0.0.0 // indirect
+	github.com/tedla-brandsema/tissues/lib/gcp v0.0.0 // indirect
 	github.com/tedla-brandsema/tissues/lib/tmpl v0.0.0 // indirect
 	github.com/tedla-brandsema/valex v0.3.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
@@ -48,11 +51,20 @@ require (
 	google.golang.org/protobuf v1.36.7 // indirect
 )
 
-replace (
-	github.com/tedla-brandsema/tissues/lib/auth => ../../../lib/auth
-	github.com/tedla-brandsema/tissues/lib/core => ../../../lib/core
-	github.com/tedla-brandsema/tissues/lib/fio => ../../../lib/fio
-	github.com/tedla-brandsema/tissues/lib/gcp => ../../../lib/gcp
-	github.com/tedla-brandsema/tissues/lib/service => ../../../lib/service
-	github.com/tedla-brandsema/tissues/lib/tmpl => ../../../lib/tmpl
-)
+replace github.com/tedla-brandsema/tissues/lib/auth => ../../../lib/auth
+
+replace github.com/tedla-brandsema/tissues/lib/core => ../../../lib/core
+
+replace github.com/tedla-brandsema/tissues/lib/server => ../../../lib/server
+
+replace github.com/tedla-brandsema/tissues/lib/service => ../../../lib/service
+
+replace github.com/tedla-brandsema/tissues/services/auth => ../../../services/auth
+
+replace github.com/tedla-brandsema/tissues/services/tissues => ../../../services/tissues
+
+replace github.com/tedla-brandsema/tissues/lib/fio => ../../../lib/fio
+
+replace github.com/tedla-brandsema/tissues/lib/gcp => ../../../lib/gcp
+
+replace github.com/tedla-brandsema/tissues/lib/tmpl => ../../../lib/tmpl

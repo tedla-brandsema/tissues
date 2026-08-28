@@ -1,4 +1,4 @@
-package service
+package server
 
 import (
 	"fmt"
@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// Config is the typed HTTP listener schema. Source resolution belongs to
-// lib/core/config; service receives only a fully resolved value.
+// Config is the typed Server listener schema. Source resolution belongs to
+// lib/core/config; Server receives only a fully resolved value.
 type Config struct {
 	Host              string        `cfg:"string,restart=true"`
 	Port              int           `cfg:"int,default=8080,restart=true,env=PORT" val:"rangeint,min=1,max=65535"`

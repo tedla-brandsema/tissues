@@ -2,62 +2,36 @@
 
 GCP-native issue tracking for humans and agents.
 
-This repository is a Go workspace organized into:
-
-- `app/`: executable application composition roots.
-- `lib/`: reusable infrastructure shared by applications.
-
-The current executables are `app/gcp/tissues`, the bootstrap product service,
-and `app/gcp/auth`, the separate Identity Platform authentication broker. The
-published Git-backed v0 is parked at `archive/git-backed-v0`; the active
-implementation is now GCP-native.
-
-## Build
+The Cloud Run deployment target is the executable `app/gcp/server`. Code under
+`app/` composes executables, `services/` contains concrete in-process Services,
+and `lib/` contains reusable libraries and SDKs. `lib/server` owns the single
+listener and process lifecycle; `lib/service` defines the contract implemented
+by `services/auth` and `services/tissues`. The historical Git-backed product is
+parked at `archive/git-backed-v0`.
 
 ```sh
-go build ./app/gcp/tissues
-go build ./app/gcp/auth
+go build ./app/gcp/server
 ```
 
-## Configuration
-
 Typed Go `Config` structs are the configuration schema. A named `Profile[T]`
-is a resolved, validated, revisioned instance of that type. Values resolve in
-one fixed order:
+is resolved, validated, immutable, and revisioned. Values resolve as:
 
 ```text
 defaults < named profile < environment < explicit CLI flags
 ```
 
-Choose a profile with `--profile NAME` and its directory with
-`--profiles DIRECTORY`; defaults are `default` and `./profiles`. The equivalent
-bootstrap variables are `<PREFIX>_PROFILE` and `<PREFIX>_PROFILES`, with CLI
-taking precedence. A missing profile file is allowed when defaults and
-overrides are sufficient. File profiles are strict `.json`, `.yaml`, or `.yml`
-documents; unknown fields and ambiguous same-name extensions are rejected.
+The outer profile contains Server, auth, and tissues contributions. Every
+Service type contributes typed config even when inactive; `auth.enabled` and
+`tissues.enabled` control concrete activation. Each active Service receives
+only its own `Profile[Config]`/`Slot[Config]`. Cloud Run's bare `PORT` override
+belongs solely to `server.Config.Port`.
 
-File, environment, and flag names derive from the same field path. For example,
-`Service.Auth.BrokerURL` becomes `service.auth.broker_url`,
-`TISSUES_SERVICE_AUTH_BROKER_URL`, and `--service-auth-broker-url`. Run either
-executable with `--help` to inspect its generated field flags. Cloud Run's
-special bare `PORT` name is declared on `service.Config.Port` as a narrow source
-override; the default port is 8080.
+Auth and tissues own their frontends under `services/auth/frontend` and
+`services/tissues/frontend`. The planned shared frontend stack is React,
+shadcn/ui, and Tailwind CSS; it is not implemented in this slice.
 
-An application profile composes stable HTTP server settings with a mandatory
-typed configuration contribution from every service, including an explicit
-empty contribution when a service has no settings. The tissues service profile
-is held separately so accepted live fields can be replaced without mutating
-server configuration;
-restart-tagged changes are explicitly reported as requiring reconstruction.
-
-Tissues auth is optional. With `service.auth.enabled: false`, browser traffic
-passes through. When enabled, tissues acts as a relying party for the separately
-deployable central auth service and requires its broker URL, client credentials,
-redirect URI, and session secret. Cookies are secure unless local development
-explicitly opts into insecure cookies.
-
-Fields tagged as secrets are redacted from provenance and diagnostics. Profile
-files can technically contain them, but deployed profiles should inject secrets
-from an external secret delivery mechanism. Secret Manager integration is not
-part of this slice. Environment variables and CLI flags are intended as
-overrides, not as a hand-maintained primary configuration schema.
+The tissues Service uses Cloud Datastore through ADC. Its typed storage config
+requires an explicit project ID and defaults its namespace to `tissues`.
+Authentication enforcement remains independently optional and preserves exact
+safe local return URLs. Secrets are tagged and redacted from configuration
+diagnostics.

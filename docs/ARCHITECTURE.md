@@ -1,94 +1,93 @@
 # GCP-native architecture
 
-Slice A establishes a multi-module Go workspace with two composition roots:
-the bootstrap tissues service and its separate authentication broker. Shared
-HTTP lifecycle, authentication, templates, filesystem helpers, and signing
-helpers live in focused `lib/` modules. It intentionally defines no Issue or
-Comment domain model and makes no issue-persistence decision.
+## Deployment boundary
 
-## Shared workspace
+A Server is the process and deployment boundary. A Service is an in-process
+component hosted by a Server. One Server can explicitly compose multiple
+Services; Services do not own listeners, `PORT`, signals, or Cloud Run
+lifecycle.
 
-The first GCP-native tissues product is one shared issue workspace.
-Authentication identifies the actor performing an operation; it does not
-define the data partition. There is no Workspace or Tenant domain object.
+GCP deploys `app/gcp/server` to Google Cloud Run. The executable owns process
+composition, `lib/server` owns the single HTTP listener and graceful lifecycle,
+`lib/service` defines the in-process Service SDK, and the concrete auth and
+tissues Services run inside that process. Server runtime != Service SDK !=
+concrete Service. GCP-native deployment means Cloud Run: this architecture
+introduces no GKE, Kubernetes, App Engine, or Compute Engine/VM deployment
+assumptions.
 
-## Deferred domain contracts
+```text
+Google Cloud Run
+    |
+    v
+app/gcp/server
+    owns explicit process composition
+    |
+    +-- lib/server
+    |       Server/process runtime: one listener and lifecycle
+    |
+    +-- lib/service
+    |       in-process Service SDK
+    |
+    +-- services/auth
+    |       +-- lib/auth/broker
+    |       +-- lib/gcp/auth
+    |
+    +-- services/tissues
+            +-- tissues domain
+            +-- tissues Datastore adapter
+```
 
-Slice B will define Issue and Comment persistence. The planned public domain ID
-contract remains 16 bytes from `crypto/rand`, encoded as lowercase base32 with
-no padding: 26 characters with no timestamp semantics. Retained authentication
-tokens do not change that future domain contract.
+Concrete `services/*` implement `lib/service`; construction remains explicit in
+the application because each Service has different provider dependencies.
 
-Markdown remains the intended canonical rich-text representation. No
-HTML-oriented editor or trusted client-supplied HTML persistence is part of
-this slice, and no editor framework has been selected.
+Service activation is concrete and independent. Both Service types always
+contribute typed config to the outer application profile, while `Auth.Enabled`
+and `Tissues.Enabled` determine whether that Service is constructed in a given
+Server deployment. An inactive Service creates no provider client and need not
+possess runtime credentials.
 
 ## Typed configuration and profiles
 
-The typed Go configuration model is:
+The outer application config is stable and contains `Server server.Config`,
+`Auth auth.Config`, and `Tissues tissues.Config`. Each Service contribution is
+resolved into its own immutable `Profile[Config]` and `Slot[Config]`; Services
+receive only that typed handle, never the outer application profile.
 
-```text
-Config type          = typed schema
-Profile[T]           = named, revisioned, resolved and validated Config
-Application config   = stable outer server + mandatory service contributions
-Service profile      = independently reloadable typed contribution
-Slot[T]              = atomic currently active Profile[T]
-```
+Values resolve in the fixed order `defaults < profile < environment < CLI`.
+Candidates are fully resolved and validated before atomic replacement. Invalid
+reloads leave the active revision unchanged, and service-profile replacement
+does not mutate outer Server configuration.
 
-Every service has a configuration contribution, including an explicit empty
-typed contribution when it currently has no configurable fields:
+## Internal Services
 
-```text
-Application profile
-    |
-    +-- outer/server config
-    |
-    +-- service config contribution(s)
-            |
-            +-- Profile[ServiceConfig]
-                    |
-                    +-- Slot[ServiceConfig]
-```
+`services/auth` owns the auth contribution, broker composition, routes,
+behavior, and `services/auth/frontend`. Reusable broker infrastructure remains
+in `lib/auth/broker`, and reusable GCP auth adapters remain in `lib/gcp/auth`.
+`services/tissues` owns the tissues contribution, Issue and Comment domain,
+repository contract, bootstrap routes, `services/tissues/frontend`, and its
+schema-specific Cloud Datastore adapter under `services/tissues/datastore`.
 
-Defaults are declared on Config fields. A candidate resolves only present
-values in the fixed order `defaults < profile < environment < CLI`, then runs
-one final Valex pass and optional cross-field validation. Published profiles
-are immutable snapshots. Reload builds and validates a complete candidate
-before atomic replacement; invalid candidates leave the active revision
-unchanged, and an effective no-op does not advance its monotonically increasing
-revision. Changed fields are classified as live or restart-required.
+Each relying Service controls authentication enforcement independently. When
+tissues enforcement is enabled, signed local state preserves the exact safe
+original request URI through broker login and callback; unsafe external targets
+remain rejected. Authentication identifies an actor but does not partition the
+single shared issue workspace.
 
-Profile persistence is separate from profile semantics. Slice A-R provides
-memory and local strict JSON/YAML stores. Cloning copies one definition into a
-new name whose revisions evolve independently. There is deliberately no profile
-inheritance, base-profile chain, filesystem watcher, or GCP profile store.
+## Tissues domain and Datastore
 
-In short:
+There is exactly one Issue type. Parentage is mutable `ParentID` relationship
+data, not an Epic/Story/Task taxonomy. Comments belong to an Issue. Markdown is
+canonical rich text; trusted client HTML is not persisted.
 
-```text
-service implementation
-+ mandatory typed config contribution
-+ profile
-= service instance
-```
+Issue IDs and Comment IDs are 16 random bytes encoded as lowercase, unpadded
+base32 (26 characters, no timestamp semantics). Datastore uses that value as a
+named StringID. `tissues_issue` entities are root keys and store only canonical
+Issue fields. `tissues_comment` entities are children of their Issue key and
+store only canonical Comment fields. Descriptions and bodies are unindexed;
+children and comments are derived and deterministically sorted in Go. Domain
+timestamps are stored as Unix-nanosecond integers so Datastore's native
+timestamp precision cannot erase the required one-nanosecond comment ordering.
 
-Cloning creates another configuration instance, not another codebase. Services
-receive only their typed sub-configuration, never an untyped application-wide
-map.
-
-## Authentication composition
-
-Central authentication remains a separate deployable service. Tissues can
-independently disable relying-party enforcement or enable it around its browser
-routes. When enabled, signed local state carries the exact safe original
-request URI through broker login and callback; external redirect targets are
-rejected. Subject and email enter downstream request context, without adding
-domain authorization in this slice.
-
-## Frontend ownership
-
-Every deployable service owns its frontend beneath `app/.../<service>/frontend`.
-Shared frontend components and tooling belong under `lib/frontend`; service
-frontends import and consume them. There is no global SPA that owns all
-services. The selected future shared stack is React, shadcn/ui, and Tailwind
-CSS, but no Node tooling or implementation of that stack belongs in this slice.
+Service-specific frontends live with their Service. Shared frontend facilities
+will live in `lib/frontend`; the planned stack is React, shadcn/ui, and Tailwind
+CSS, but that frontend implementation belongs to a later slice.

@@ -23,7 +23,7 @@ type Config struct {
 	HTTPClient     *http.Client
 }
 
-// Frontend is supplied by the deployable service that owns its UI.
+// Frontend is supplied by the internal auth Service that owns its UI.
 type Frontend struct {
 	Static    fs.FS
 	Templates fs.FS
