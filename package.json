@@ -4,11 +4,12 @@
   "version": "0.0.0",
   "workspaces": [
     "lib/frontend",
+    "services/auth/frontend",
     "services/tissues/frontend"
   ],
   "scripts": {
-    "build": "npm run build --workspace @tissues/workspace",
-    "test": "npm run test --workspace @tissues/workspace",
-    "typecheck": "npm run typecheck --workspace @tissues/workspace"
+    "build": "npm run build --workspace @tissues/auth-frontend && npm run build --workspace @tissues/workspace",
+    "test": "npm run test --workspace @tissues/auth-frontend && npm run test --workspace @tissues/workspace",
+    "typecheck": "npm run typecheck --workspace @tissues/auth-frontend && npm run typecheck --workspace @tissues/workspace"
   }
 }

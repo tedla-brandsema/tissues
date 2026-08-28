@@ -29,6 +29,17 @@ npm run typecheck
 npm run build
 ```
 
+To run both Services locally against the shared `tissues-dev` Identity Platform
+and Datastore development resources, supply the development Identity Platform
+API key at launch time:
+
+```sh
+./run-tissues-local.sh '<identity-platform-api-key>'
+```
+
+The key is passed only to the process environment; do not store a real key in
+the repository.
+
 Typed Go `Config` structs are the configuration schema. A named `Profile[T]`
 is resolved, validated, immutable, and revisioned. Values resolve as:
 

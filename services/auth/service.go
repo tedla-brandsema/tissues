@@ -3,7 +3,6 @@ package auth
 import (
 	"embed"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"strings"
 
@@ -23,7 +22,7 @@ type Service struct {
 
 var _ service.Service = (*Service)(nil)
 
-//go:embed frontend
+//go:embed frontend/generated
 var frontendFiles embed.FS
 
 func New(profile service.Profile[Config], client *gcds.Client) (*Service, error) {
@@ -41,11 +40,11 @@ func New(profile service.Profile[Config], client *gcds.Client) (*Service, error)
 		return nil, fmt.Errorf("auth Datastore client is required")
 	}
 	brokerService := broker.NewService(broker.ServiceConfig{SigningSecret: []byte(cfg.SigningSecret), Clients: map[string]broker.Client{cfg.ClientID: {ID: cfg.ClientID, Secret: cfg.ClientSecret, RedirectURI: cfg.ClientRedirectURI}}, Entitlements: parseEntitlements(cfg.Entitlements), CodeStore: broker.NewDatastoreCodeStore(client, cfg.DatastoreNS, cfg.DatastoreKind)})
-	frontend, err := fs.Sub(frontendFiles, "frontend")
+	frontend, err := newFrontendHandler(frontendFiles, "/auth/login")
 	if err != nil {
 		return nil, err
 	}
-	login, err := gcpauth.New(gcpauth.Config{BasePath: "/auth/login", Secret: []byte(cfg.SigningSecret), LoginRedirect: "/authorize", InsecureCookie: cfg.InsecureCookie, APIKey: cfg.IdentityAPIKey, TenantID: cfg.IdentityTenantID}, gcpauth.Frontend{Static: frontend, Templates: frontend})
+	login, err := gcpauth.New(gcpauth.Config{BasePath: "/auth/login", Secret: []byte(cfg.SigningSecret), LoginRedirect: "/authorize", InsecureCookie: cfg.InsecureCookie, APIKey: cfg.IdentityAPIKey, TenantID: cfg.IdentityTenantID}, gcpauth.Frontend{GET: frontend})
 	if err != nil {
 		return nil, err
 	}

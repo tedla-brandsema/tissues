@@ -2,13 +2,8 @@ package gcp
 
 import (
 	"fmt"
-	"html/template"
-	"io/fs"
 	"net/http"
 	"strings"
-
-	"github.com/tedla-brandsema/tissues/lib/fio"
-	"github.com/tedla-brandsema/tissues/lib/tmpl"
 )
 
 type Config struct {
@@ -25,24 +20,18 @@ type Config struct {
 
 // Frontend is supplied by the internal auth Service that owns its UI.
 type Frontend struct {
-	Static    fs.FS
-	Templates fs.FS
+	GET http.Handler
 }
 
 type authView struct {
 	cfg          Config
 	loginHandler http.HandlerFunc
-	static       http.Handler
-	templates    *template.Template
+	frontend     http.Handler
 }
 
 func New(cfg Config, frontend Frontend) (http.Handler, error) {
-	if frontend.Static == nil || frontend.Templates == nil {
-		return nil, fmt.Errorf("auth frontend static and templates are required")
-	}
-	templates, err := tmpl.CollectTemplates(frontend.Templates)
-	if err != nil {
-		return nil, fmt.Errorf("load auth frontend templates: %w", err)
+	if frontend.GET == nil {
+		return nil, fmt.Errorf("auth frontend GET handler is required")
 	}
 	cfg.BasePath = cleanBasePath(cfg.BasePath)
 	if cfg.LoginRedirect == "" {
@@ -52,8 +41,7 @@ func New(cfg Config, frontend Frontend) (http.Handler, error) {
 	return &authView{
 		cfg:          cfg,
 		loginHandler: loginHandler(NewVerifier(cfg.APIKey, cfg.HTTPClient), cfg),
-		static:       http.StripPrefix(cfg.BasePath, fio.FsNoDirFileServer(frontend.Static)),
-		templates:    templates,
+		frontend:     frontend.GET,
 	}, nil
 }
 
@@ -67,7 +55,7 @@ func (a *authView) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rest == "" || rest == "/" {
 		switch r.Method {
 		case http.MethodGet:
-			a.handleRoot(w, r)
+			a.frontend.ServeHTTP(w, r)
 		case http.MethodPost:
 			a.loginHandler(w, r)
 		default:
@@ -76,25 +64,15 @@ func (a *authView) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch {
-	case strings.HasPrefix(rest, "/static/"):
-		a.static.ServeHTTP(w, r)
-	default:
-		http.NotFound(w, r)
-	}
-}
-
-func (a *authView) handleRoot(w http.ResponseWriter, _ *http.Request) {
-	data := struct {
-		BasePath string
-	}{
-		BasePath: a.cfg.BasePath,
-	}
-
-	if err := a.templates.ExecuteTemplate(w, "login", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !strings.HasPrefix(rest, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	a.frontend.ServeHTTP(w, r)
 }
 
 func cleanBasePath(p string) string {
