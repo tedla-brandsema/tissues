@@ -16,9 +16,12 @@ import (
 )
 
 const (
-	testIssuer   = "https://auth.example.test"
-	testResource = "https://auth.example.test/mcp"
-	testRedirect = "https://app.example.test/callback"
+	testIssuer     = "https://auth.example.test"
+	testResource   = "https://auth.example.test/mcp"
+	testRedirect   = "https://app.example.test/callback"
+	publicRedirect = "https://public.example.test/callback"
+	testVerifier   = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	testChallenge  = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 )
 
 func newTestService() *Service {
@@ -27,7 +30,11 @@ func newTestService() *Service {
 		Issuer:        testIssuer, Resource: testResource,
 		Scopes:            []string{"tissues:read", "tissues:write"},
 		ScopeImplications: map[string][]string{"tissues:write": {"tissues:read"}},
-		Clients:           map[string]Client{"tissues": {ID: "tissues", Secret: "secret", RedirectURI: testRedirect}},
+		Clients: map[string]Client{
+			"tissues":  {ID: "tissues", Secret: "secret", RedirectURIs: []string{testRedirect}, TokenEndpointAuthMethod: TokenEndpointAuthMethodClientSecretPost},
+			"public":   {ID: "public", RedirectURIs: []string{publicRedirect}, TokenEndpointAuthMethod: TokenEndpointAuthMethodNone},
+			"public-b": {ID: "public-b", RedirectURIs: []string{publicRedirect}, TokenEndpointAuthMethod: TokenEndpointAuthMethodNone},
+		},
 	})
 }
 
@@ -123,6 +130,34 @@ func exchange(t *testing.T, svc *Service, code, resource string) *httptest.Respo
 	return rec
 }
 
+func requireTokenResponseHeaders(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if got := rec.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	if got := rec.Header().Get("Pragma"); got != "no-cache" {
+		t.Fatalf("Pragma = %q", got)
+	}
+}
+
+func requireTokenError(t *testing.T, rec *httptest.ResponseRecorder, status int, code string) {
+	t.Helper()
+	if rec.Code != status {
+		t.Fatalf("token error status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	requireTokenResponseHeaders(t, rec)
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("token error is not JSON: %v body=%q", err, rec.Body.String())
+	}
+	if !reflect.DeepEqual(body, map[string]any{"error": code}) {
+		t.Fatalf("token error = %#v", body)
+	}
+}
+
 func TestBrowserAuthorizationAndTokenExchangeRemainResourceAndScopeLess(t *testing.T) {
 	svc := newTestService()
 	rec := authorize(t, svc, url.Values{"state": {"opaque"}})
@@ -138,6 +173,7 @@ func TestBrowserAuthorizationAndTokenExchangeRemainResourceAndScopeLess(t *testi
 	if tokenRec.Code != http.StatusOK {
 		t.Fatalf("token status = %d body=%q", tokenRec.Code, tokenRec.Body.String())
 	}
+	requireTokenResponseHeaders(t, tokenRec)
 	var response map[string]any
 	if err := json.Unmarshal(tokenRec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
@@ -233,26 +269,22 @@ func TestResourceBindingIsAtomicAndCodeRemainsSingleUse(t *testing.T) {
 		svc := newTestService()
 		code := authorizationCode(t, authorize(t, svc, url.Values{"resource": {testResource}, "scope": {"tissues:read"}}))
 		rec := exchange(t, svc, code, resource)
-		if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != "invalid_grant" {
-			t.Fatalf("resource %q exchange = %d %q", resource, rec.Code, rec.Body.String())
-		}
+		requireTokenError(t, rec, http.StatusBadRequest, "invalid_grant")
 		if correct := exchange(t, svc, code, testResource); correct.Code != http.StatusOK {
 			t.Fatalf("resource %q mismatch consumed code: correct exchange = %d %q", resource, correct.Code, correct.Body.String())
 		}
-		if replay := exchange(t, svc, code, testResource); replay.Code != http.StatusBadRequest || strings.TrimSpace(replay.Body.String()) != "invalid_grant" {
-			t.Fatalf("resource %q successful exchange replay = %d %q", resource, replay.Code, replay.Body.String())
-		}
+		requireTokenError(t, exchange(t, svc, code, testResource), http.StatusBadRequest, "invalid_grant")
 	}
 }
 
 func TestInMemoryClientAndRedirectMismatchesDoNotConsumeCode(t *testing.T) {
 	for name, mismatch := range map[string]func(*Service, string) error{
 		"client": func(svc *Service, code string) error {
-			_, err := svc.consumeCode(context.Background(), code, "other", testRedirect, "")
+			_, err := svc.consumeCode(context.Background(), code, "other", testRedirect, "", "")
 			return err
 		},
 		"redirect": func(svc *Service, code string) error {
-			_, err := svc.consumeCode(context.Background(), code, "tissues", testRedirect+"/wrong", "")
+			_, err := svc.consumeCode(context.Background(), code, "tissues", testRedirect+"/wrong", "", "")
 			return err
 		},
 	} {
@@ -262,10 +294,10 @@ func TestInMemoryClientAndRedirectMismatchesDoNotConsumeCode(t *testing.T) {
 			if err := mismatch(svc, code); err == nil {
 				t.Fatal("mismatch unexpectedly succeeded")
 			}
-			if _, err := svc.consumeCode(context.Background(), code, "tissues", testRedirect, ""); err != nil {
+			if _, err := svc.consumeCode(context.Background(), code, "tissues", testRedirect, "", ""); err != nil {
 				t.Fatalf("correct redemption after mismatch: %v", err)
 			}
-			if _, err := svc.consumeCode(context.Background(), code, "tissues", testRedirect, ""); err == nil {
+			if _, err := svc.consumeCode(context.Background(), code, "tissues", testRedirect, "", ""); err == nil {
 				t.Fatal("successful redemption replay unexpectedly succeeded")
 			}
 		})
@@ -279,6 +311,7 @@ func TestScopedTokenClaimsResponseAndVerification(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%q", rec.Code, rec.Body.String())
 	}
+	requireTokenResponseHeaders(t, rec)
 	var response map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
@@ -318,8 +351,42 @@ func TestTokenExchangeRequiresConfidentialClientSecret(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
 	svc.TokenHandler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized || strings.TrimSpace(rec.Body.String()) != "invalid_client" {
-		t.Fatalf("exchange = %d %q", rec.Code, rec.Body.String())
+	requireTokenError(t, rec, http.StatusUnauthorized, "invalid_client")
+}
+
+func TestTokenEndpointErrorsUseOAuthJSONAndNoCacheHeaders(t *testing.T) {
+	svc := newTestService()
+
+	unsupported := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader("grant_type=refresh_token"))
+	unsupported.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	unsupportedRec := httptest.NewRecorder()
+	svc.TokenHandler().ServeHTTP(unsupportedRec, unsupported)
+	requireTokenError(t, unsupportedRec, http.StatusBadRequest, "unsupported_grant_type")
+
+	malformed := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader("grant_type=%zz"))
+	malformed.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	malformedRec := httptest.NewRecorder()
+	svc.TokenHandler().ServeHTTP(malformedRec, malformed)
+	requireTokenError(t, malformedRec, http.StatusBadRequest, "invalid_request")
+}
+
+func TestTokenErrorsDoNotLeakSensitiveRequestMaterial(t *testing.T) {
+	svc := newTestService()
+	code := authorizationCode(t, authorizePublic(t, svc, nil))
+	wrongVerifier := strings.Repeat("z", 43)
+	rec := exchangePublic(t, svc, code, func(values url.Values) {
+		values.Set("code_verifier", wrongVerifier)
+	})
+	requireTokenError(t, rec, http.StatusBadRequest, "invalid_grant")
+	for name, sensitive := range map[string]string{
+		"authorization code": code,
+		"code verifier":      wrongVerifier,
+		"client secret":      "secret",
+		"signing secret":     string(svc.cfg.SigningSecret),
+	} {
+		if strings.Contains(rec.Body.String(), sensitive) {
+			t.Fatalf("token error contains %s", name)
+		}
 	}
 }
 
@@ -346,14 +413,13 @@ func TestVerifyAccessTokenRejectsInvalidTokensWithoutLeakingThem(t *testing.T) {
 	valid := accessToken{Issuer: testIssuer, Resource: testResource, Subject: "subject-1", Email: "person@example.test", ClientID: "tissues", Scope: "tissues:read", IssuedAt: now, ExpiresAt: now + 900}
 	tests := map[string]accessToken{
 		"wrong issuer": valid, "wrong resource": valid, "missing subject": valid,
-		"missing client": valid, "unknown client": valid, "missing issued at": valid,
+		"missing client": valid, "missing issued at": valid,
 		"bad expiry": valid, "unknown scope": valid, "noncanonical scopes": valid,
 	}
 	tests["wrong issuer"] = withToken(valid, func(v *accessToken) { v.Issuer = "https://wrong.example" })
 	tests["wrong resource"] = withToken(valid, func(v *accessToken) { v.Resource = "https://wrong.example/mcp" })
 	tests["missing subject"] = withToken(valid, func(v *accessToken) { v.Subject = "" })
 	tests["missing client"] = withToken(valid, func(v *accessToken) { v.ClientID = "" })
-	tests["unknown client"] = withToken(valid, func(v *accessToken) { v.ClientID = "other" })
 	tests["missing issued at"] = withToken(valid, func(v *accessToken) { v.IssuedAt = 0 })
 	tests["bad expiry"] = withToken(valid, func(v *accessToken) { v.ExpiresAt = v.IssuedAt })
 	tests["unknown scope"] = withToken(valid, func(v *accessToken) { v.Scope = "other" })
@@ -372,6 +438,14 @@ func TestVerifyAccessTokenRejectsInvalidTokensWithoutLeakingThem(t *testing.T) {
 	}
 	if _, err := svc.VerifyAccessToken("tampered-token", testIssuer, testResource); !errors.Is(err, ErrInvalidAccessToken) {
 		t.Fatalf("tampered error = %v", err)
+	}
+	unknownClient := withToken(valid, func(v *accessToken) { v.ClientID = "no-longer-registered" })
+	unknownClientRaw, err := encodeSigned(unknownClient, svc.cfg.SigningSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := svc.VerifyAccessToken(unknownClientRaw, testIssuer, testResource); err != nil || got.ClientID != unknownClient.ClientID {
+		t.Fatalf("signed token for removed client = %#v, %v", got, err)
 	}
 	malformed, err := encodeSigned(map[string]any{"iss": testIssuer, "aud": testResource, "sub": "subject-1", "client_id": "tissues", "scope": "tissues:read", "iat": "not-a-timestamp", "exp": now + 900}, svc.cfg.SigningSecret)
 	if err != nil {
@@ -418,9 +492,9 @@ func TestCodeStoreReceivesAndMatchesResourceAndScopes(t *testing.T) {
 }
 
 type recordingCodeStore struct {
-	code, resource string
-	value          authCode
-	consumed       bool
+	code, resource, codeVerifier string
+	value                        authCode
+	consumed                     bool
 }
 
 func (s *recordingCodeStore) SaveCode(_ context.Context, code string, value authCode) error {
@@ -428,15 +502,16 @@ func (s *recordingCodeStore) SaveCode(_ context.Context, code string, value auth
 	return nil
 }
 
-func (s *recordingCodeStore) ConsumeCode(_ context.Context, code, clientID, redirectURI, resource string) (authCode, error) {
+func (s *recordingCodeStore) ConsumeCode(_ context.Context, code, clientID, redirectURI, resource, codeVerifier string) (authCode, error) {
 	if s.consumed || code != s.code {
 		return authCode{}, ErrCodeNotFound
 	}
-	s.consumed = true
 	s.resource = resource
-	if s.value.ClientID != clientID || s.value.RedirectURI != redirectURI || s.value.Resource != resource {
+	s.codeVerifier = codeVerifier
+	if err := validateCodeBinding(s.value, clientID, redirectURI, resource, codeVerifier, time.Now()); err != nil {
 		return authCode{}, ErrCodeMismatch
 	}
+	s.consumed = true
 	return s.value, nil
 }
 

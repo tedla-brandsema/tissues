@@ -25,13 +25,15 @@ type DatastoreCodeStore struct {
 }
 
 type codeEntity struct {
-	Subject     string   `datastore:"subject"`
-	Email       string   `datastore:"email"`
-	ClientID    string   `datastore:"client_id"`
-	RedirectURI string   `datastore:"redirect_uri,noindex"`
-	Resource    string   `datastore:"resource,noindex"`
-	Scopes      []string `datastore:"scopes"`
-	ExpiresUnix int64    `datastore:"expires_unix"`
+	Subject             string   `datastore:"subject"`
+	Email               string   `datastore:"email"`
+	ClientID            string   `datastore:"client_id"`
+	RedirectURI         string   `datastore:"redirect_uri,noindex"`
+	Resource            string   `datastore:"resource,noindex"`
+	Scopes              []string `datastore:"scopes"`
+	CodeChallenge       string   `datastore:"code_challenge,noindex"`
+	CodeChallengeMethod string   `datastore:"code_challenge_method,noindex"`
+	ExpiresUnix         int64    `datastore:"expires_unix"`
 }
 
 func NewDatastoreCodeStore(client *gcds.Client, namespace, kind string) *DatastoreCodeStore {
@@ -56,17 +58,19 @@ func (s *DatastoreCodeStore) SaveCode(ctx context.Context, code string, val auth
 
 func newCodeEntity(val authCode) codeEntity {
 	return codeEntity{
-		Subject:     val.Subject,
-		Email:       val.Email,
-		ClientID:    val.ClientID,
-		RedirectURI: val.RedirectURI,
-		Resource:    val.Resource,
-		Scopes:      append([]string(nil), val.Scopes...),
-		ExpiresUnix: val.ExpiresAt.Unix(),
+		Subject:             val.Subject,
+		Email:               val.Email,
+		ClientID:            val.ClientID,
+		RedirectURI:         val.RedirectURI,
+		Resource:            val.Resource,
+		Scopes:              append([]string(nil), val.Scopes...),
+		CodeChallenge:       val.CodeChallenge,
+		CodeChallengeMethod: val.CodeChallengeMethod,
+		ExpiresUnix:         val.ExpiresAt.Unix(),
 	}
 }
 
-func (s *DatastoreCodeStore) ConsumeCode(ctx context.Context, code, clientID, redirectURI, resource string) (authCode, error) {
+func (s *DatastoreCodeStore) ConsumeCode(ctx context.Context, code, clientID, redirectURI, resource, codeVerifier string) (authCode, error) {
 	if s == nil || s.client == nil {
 		return authCode{}, errors.New("datastore code store is not initialized")
 	}
@@ -83,7 +87,7 @@ func (s *DatastoreCodeStore) ConsumeCode(ctx context.Context, code, clientID, re
 		}
 
 		var consumeErr error
-		out, consumeErr = consumeCodeEntity(ent, clientID, redirectURI, resource, time.Now())
+		out, consumeErr = consumeCodeEntity(ent, clientID, redirectURI, resource, codeVerifier, time.Now())
 		if consumeErr != nil {
 			return consumeErr
 		}
@@ -92,25 +96,25 @@ func (s *DatastoreCodeStore) ConsumeCode(ctx context.Context, code, clientID, re
 	return out, err
 }
 
-func consumeCodeEntity(ent codeEntity, clientID, redirectURI, resource string, now time.Time) (authCode, error) {
-	if now.Unix() > ent.ExpiresUnix {
-		return authCode{}, ErrCodeExpired
+func consumeCodeEntity(ent codeEntity, clientID, redirectURI, resource, codeVerifier string, now time.Time) (authCode, error) {
+	code := ent.authorizationCode()
+	if err := validateCodeBinding(code, clientID, redirectURI, resource, codeVerifier, now); err != nil {
+		return authCode{}, err
 	}
-	if ent.ClientID != clientID || ent.RedirectURI != redirectURI || ent.Resource != resource {
-		return authCode{}, ErrCodeMismatch
-	}
-	return ent.authorizationCode(), nil
+	return code, nil
 }
 
 func (ent codeEntity) authorizationCode() authCode {
 	return authCode{
-		Subject:     ent.Subject,
-		Email:       ent.Email,
-		ClientID:    ent.ClientID,
-		RedirectURI: ent.RedirectURI,
-		Resource:    ent.Resource,
-		Scopes:      append([]string(nil), ent.Scopes...),
-		ExpiresAt:   time.Unix(ent.ExpiresUnix, 0),
+		Subject:             ent.Subject,
+		Email:               ent.Email,
+		ClientID:            ent.ClientID,
+		RedirectURI:         ent.RedirectURI,
+		Resource:            ent.Resource,
+		Scopes:              append([]string(nil), ent.Scopes...),
+		CodeChallenge:       ent.CodeChallenge,
+		CodeChallengeMethod: ent.CodeChallengeMethod,
+		ExpiresAt:           time.Unix(ent.ExpiresUnix, 0),
 	}
 }
 

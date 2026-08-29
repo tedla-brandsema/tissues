@@ -85,10 +85,10 @@ func TestAuthorizationServerMetadataIsTruthfulAndCanonical(t *testing.T) {
 	if got["issuer"] != cfg.IssuerURL || got["authorization_endpoint"] != cfg.IssuerURL+"/authorize" || got["token_endpoint"] != cfg.IssuerURL+"/token" || got["authorization_response_iss_parameter_supported"] != true {
 		t.Fatalf("metadata = %#v", got)
 	}
-	if !reflect.DeepEqual(got["response_types_supported"], []any{"code"}) || !reflect.DeepEqual(got["grant_types_supported"], []any{"authorization_code"}) || !reflect.DeepEqual(got["token_endpoint_auth_methods_supported"], []any{"client_secret_post"}) || !reflect.DeepEqual(got["scopes_supported"], []any{ScopeRead, ScopeWrite}) {
+	if !reflect.DeepEqual(got["response_types_supported"], []any{"code"}) || !reflect.DeepEqual(got["grant_types_supported"], []any{"authorization_code"}) || !reflect.DeepEqual(got["token_endpoint_auth_methods_supported"], []any{"none", "client_secret_post"}) || !reflect.DeepEqual(got["code_challenge_methods_supported"], []any{"S256"}) || !reflect.DeepEqual(got["scopes_supported"], []any{ScopeRead, ScopeWrite}) {
 		t.Fatalf("metadata capabilities = %#v", got)
 	}
-	for _, forbidden := range []string{"code_challenge_methods_supported", "registration_endpoint", "client_id_metadata_document_supported", "refresh_token", "offline_access", "none"} {
+	for _, forbidden := range []string{"registration_endpoint", "client_id_metadata_document_supported", "refresh_token", "offline_access"} {
 		if _, ok := got[forbidden]; ok || strings.Contains(rec.Body.String(), `"`+forbidden+`"`) {
 			t.Fatalf("metadata advertises %q: %s", forbidden, rec.Body.String())
 		}

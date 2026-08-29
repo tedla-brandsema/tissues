@@ -16,10 +16,18 @@ import (
 )
 
 type Client struct {
-	ID          string
-	Secret      string
-	RedirectURI string
+	ID                      string
+	Secret                  string
+	RedirectURIs            []string
+	TokenEndpointAuthMethod TokenEndpointAuthMethod
 }
+
+type TokenEndpointAuthMethod string
+
+const (
+	TokenEndpointAuthMethodNone             TokenEndpointAuthMethod = "none"
+	TokenEndpointAuthMethodClientSecretPost TokenEndpointAuthMethod = "client_secret_post"
+)
 
 type ServiceConfig struct {
 	SigningSecret     []byte
@@ -41,13 +49,15 @@ type Service struct {
 }
 
 type authCode struct {
-	Subject     string
-	Email       string
-	ClientID    string
-	RedirectURI string
-	Resource    string
-	Scopes      []string
-	ExpiresAt   time.Time
+	Subject             string
+	Email               string
+	ClientID            string
+	RedirectURI         string
+	Resource            string
+	Scopes              []string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	ExpiresAt           time.Time
 }
 
 type accessToken struct {
@@ -63,7 +73,7 @@ type accessToken struct {
 
 type CodeStore interface {
 	SaveCode(ctx context.Context, code string, val authCode) error
-	ConsumeCode(ctx context.Context, code, clientID, redirectURI, resource string) (authCode, error)
+	ConsumeCode(ctx context.Context, code, clientID, redirectURI, resource, codeVerifier string) (authCode, error)
 }
 
 func NewService(cfg ServiceConfig) *Service {
@@ -86,15 +96,26 @@ func (s *Service) AuthorizeHandler() http.Handler {
 			return
 		}
 
-		clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
-		redirectURI := strings.TrimSpace(r.URL.Query().Get("redirect_uri"))
-		state := strings.TrimSpace(r.URL.Query().Get("state"))
+		query := r.URL.Query()
+		clientIDs, hasClientID := query["client_id"]
+		redirectURIs, hasRedirectURI := query["redirect_uri"]
+		if !hasClientID || len(clientIDs) != 1 || strings.TrimSpace(clientIDs[0]) == "" || !hasRedirectURI || len(redirectURIs) != 1 || strings.TrimSpace(redirectURIs[0]) == "" {
+			http.Error(w, "client_id and redirect_uri are required", http.StatusBadRequest)
+			return
+		}
+		clientID := strings.TrimSpace(clientIDs[0])
+		redirectURI := strings.TrimSpace(redirectURIs[0])
 		client, err := s.validateClient(clientID, redirectURI)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		query := r.URL.Query()
+		states, hasState := query["state"]
+		if hasState && len(states) != 1 {
+			redirectWithError(w, r, redirectURI, "", s.cfg.Issuer, "invalid_request")
+			return
+		}
+		state := strings.TrimSpace(query.Get("state"))
 		responseTypes, hasResponseType := query["response_type"]
 		if !hasResponseType || len(responseTypes) != 1 || responseTypes[0] == "" {
 			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "invalid_request")
@@ -104,19 +125,30 @@ func (s *Service) AuthorizeHandler() http.Handler {
 			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "unsupported_response_type")
 			return
 		}
+		if client.TokenEndpointAuthMethod != TokenEndpointAuthMethodNone && client.TokenEndpointAuthMethod != TokenEndpointAuthMethodClientSecretPost {
+			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "unauthorized_client")
+			return
+		}
+		publicClient := client.TokenEndpointAuthMethod == TokenEndpointAuthMethodNone
 		resources, hasResource := query["resource"]
 		resource := query.Get("resource")
-		if hasResource && (len(resources) != 1 || resource == "" || resource != s.cfg.Resource) {
+		if (publicClient && (!hasResource || len(resources) != 1 || resource == "" || resource != s.cfg.Resource)) || (!publicClient && hasResource && (len(resources) != 1 || resource == "" || resource != s.cfg.Resource)) {
 			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "invalid_target")
 			return
 		}
-		if scopesRaw, ok := query["scope"]; ok && len(scopesRaw) != 1 {
+		scopesRaw, hasScope := query["scope"]
+		if hasScope && len(scopesRaw) != 1 {
 			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "invalid_scope")
 			return
 		}
 		scopes, err := canonicalScopes(query.Get("scope"), s.cfg.Scopes, s.cfg.ScopeImplications)
-		if err != nil || (query.Has("scope") && len(scopes) == 0) {
+		if err != nil || (hasScope && len(scopes) == 0) || (publicClient && (!hasScope || len(scopes) == 0)) {
 			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "invalid_scope")
+			return
+		}
+		codeChallenge, codeChallengeMethod, err := authorizationPKCE(query, publicClient)
+		if err != nil {
+			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "invalid_request")
 			return
 		}
 
@@ -133,7 +165,7 @@ func (s *Service) AuthorizeHandler() http.Handler {
 			return
 		}
 
-		code, err := s.issueCode(r.Context(), subject, email, client.ID, redirectURI, resource, scopes)
+		code, err := s.issueCode(r.Context(), subject, email, client.ID, redirectURI, resource, scopes, codeChallenge, codeChallengeMethod)
 		if err != nil {
 			http.Error(w, "failed to issue code", http.StatusInternalServerError)
 			return
@@ -158,38 +190,79 @@ func (s *Service) TokenHandler() http.Handler {
 			return
 		}
 		if err := r.ParseForm(); err != nil {
-			http.Error(w, "invalid form", http.StatusBadRequest)
+			writeTokenError(w, http.StatusBadRequest, "invalid_request")
 			return
 		}
-		if strings.TrimSpace(r.FormValue("grant_type")) != "authorization_code" {
-			http.Error(w, "unsupported grant_type", http.StatusBadRequest)
+		grantType, hasGrantType := singlePostFormValue(r, "grant_type")
+		if !hasGrantType || strings.TrimSpace(grantType) != "authorization_code" {
+			writeTokenError(w, http.StatusBadRequest, "unsupported_grant_type")
 			return
 		}
 
-		clientID := strings.TrimSpace(r.FormValue("client_id"))
-		clientSecret := strings.TrimSpace(r.FormValue("client_secret"))
-		redirectURI := strings.TrimSpace(r.FormValue("redirect_uri"))
-		codeVal := strings.TrimSpace(r.FormValue("code"))
+		clientIDRaw, hasClientID := singlePostFormValue(r, "client_id")
+		if !hasClientID {
+			writeTokenError(w, http.StatusUnauthorized, "invalid_client")
+			return
+		}
+		clientID := strings.TrimSpace(clientIDRaw)
+		redirectURIRaw, hasRedirectURI := singlePostFormValue(r, "redirect_uri")
+		codeValRaw, hasCode := singlePostFormValue(r, "code")
+		if !hasRedirectURI || !hasCode {
+			writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+			return
+		}
+		redirectURI := strings.TrimSpace(redirectURIRaw)
+		codeVal := strings.TrimSpace(codeValRaw)
 		resources, hasResource := r.PostForm["resource"]
-		resource := r.PostFormValue("resource")
-		if hasResource && (len(resources) != 1 || resource == "") {
-			http.Error(w, "invalid_grant", http.StatusBadRequest)
+		resource := ""
+		if len(resources) == 1 {
+			resource = resources[0]
+		}
+		if len(r.Form["resource"]) != len(resources) || (hasResource && (len(resources) != 1 || resource == "")) {
+			writeTokenError(w, http.StatusBadRequest, "invalid_grant")
 			return
 		}
 
-		client, err := s.validateClient(clientID, redirectURI)
-		if err != nil {
-			http.Error(w, "invalid_client", http.StatusUnauthorized)
+		client, ok := s.cfg.Clients[clientID]
+		if !ok || client.ID != clientID {
+			writeTokenError(w, http.StatusUnauthorized, "invalid_client")
 			return
 		}
-		if clientSecret == "" || clientSecret != client.Secret {
-			http.Error(w, "invalid_client", http.StatusUnauthorized)
+		if !matchesRedirectURI(client.RedirectURIs, redirectURI, client.TokenEndpointAuthMethod == TokenEndpointAuthMethodNone) {
+			writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+			return
+		}
+		codeVerifier := ""
+		switch client.TokenEndpointAuthMethod {
+		case TokenEndpointAuthMethodClientSecretPost:
+			clientSecrets, ok := r.PostForm["client_secret"]
+			if !ok || len(clientSecrets) != 1 || len(r.Form["client_secret"]) != 1 || clientSecrets[0] == "" || clientSecrets[0] != client.Secret {
+				writeTokenError(w, http.StatusUnauthorized, "invalid_client")
+				return
+			}
+			if _, ok := r.Form["code_verifier"]; ok {
+				writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+				return
+			}
+		case TokenEndpointAuthMethodNone:
+			if _, ok := r.Form["client_secret"]; ok {
+				writeTokenError(w, http.StatusUnauthorized, "invalid_client")
+				return
+			}
+			verifiers, ok := r.PostForm["code_verifier"]
+			if !ok || len(verifiers) != 1 || len(r.Form["code_verifier"]) != 1 || !validPKCEValue(verifiers[0]) {
+				writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+				return
+			}
+			codeVerifier = verifiers[0]
+		default:
+			writeTokenError(w, http.StatusUnauthorized, "invalid_client")
 			return
 		}
 
-		code, err := s.consumeCode(r.Context(), codeVal, clientID, redirectURI, resource)
+		code, err := s.consumeCode(r.Context(), codeVal, clientID, redirectURI, resource, codeVerifier)
 		if err != nil {
-			http.Error(w, "invalid_grant", http.StatusBadRequest)
+			writeTokenError(w, http.StatusBadRequest, "invalid_grant")
 			return
 		}
 
@@ -206,7 +279,7 @@ func (s *Service) TokenHandler() http.Handler {
 		}
 		accessTokenRaw, err := encodeSigned(tok, s.cfg.SigningSecret)
 		if err != nil {
-			http.Error(w, "server_error", http.StatusInternalServerError)
+			writeTokenError(w, http.StatusInternalServerError, "server_error")
 			return
 		}
 
@@ -218,8 +291,28 @@ func (s *Service) TokenHandler() http.Handler {
 		if tok.Scope != "" {
 			response["scope"] = tok.Scope
 		}
-		writeJSON(w, http.StatusOK, response)
+		writeTokenJSON(w, http.StatusOK, response)
 	})
+}
+
+func singlePostFormValue(r *http.Request, key string) (string, bool) {
+	values, ok := r.PostForm[key]
+	if !ok || len(values) != 1 || len(r.Form[key]) != 1 {
+		return "", false
+	}
+	return values[0], true
+}
+
+func writeTokenError(w http.ResponseWriter, status int, code string) {
+	writeTokenJSON(w, status, map[string]string{"error": code})
+}
+
+func writeTokenJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 func (s *Service) UserinfoHandler() http.Handler {
@@ -253,19 +346,21 @@ func (s *Service) UserinfoHandler() http.Handler {
 	})
 }
 
-func (s *Service) issueCode(ctx context.Context, subject, email, clientID, redirectURI, resource string, scopes []string) (string, error) {
+func (s *Service) issueCode(ctx context.Context, subject, email, clientID, redirectURI, resource string, scopes []string, codeChallenge, codeChallengeMethod string) (string, error) {
 	codeVal, err := randomToken(32)
 	if err != nil {
 		return "", err
 	}
 	val := authCode{
-		Subject:     subject,
-		Email:       email,
-		ClientID:    clientID,
-		RedirectURI: redirectURI,
-		Resource:    resource,
-		Scopes:      append([]string(nil), scopes...),
-		ExpiresAt:   time.Now().Add(s.cfg.CodeTTL),
+		Subject:             subject,
+		Email:               email,
+		ClientID:            clientID,
+		RedirectURI:         redirectURI,
+		Resource:            resource,
+		Scopes:              append([]string(nil), scopes...),
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: codeChallengeMethod,
+		ExpiresAt:           time.Now().Add(s.cfg.CodeTTL),
 	}
 	if s.cfg.CodeStore != nil {
 		if err := s.cfg.CodeStore.SaveCode(ctx, codeVal, val); err != nil {
@@ -279,9 +374,9 @@ func (s *Service) issueCode(ctx context.Context, subject, email, clientID, redir
 	return codeVal, nil
 }
 
-func (s *Service) consumeCode(ctx context.Context, codeVal, clientID, redirectURI, resource string) (authCode, error) {
+func (s *Service) consumeCode(ctx context.Context, codeVal, clientID, redirectURI, resource, codeVerifier string) (authCode, error) {
 	if s.cfg.CodeStore != nil {
-		return s.cfg.CodeStore.ConsumeCode(ctx, codeVal, clientID, redirectURI, resource)
+		return s.cfg.CodeStore.ConsumeCode(ctx, codeVal, clientID, redirectURI, resource, codeVerifier)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -290,11 +385,8 @@ func (s *Service) consumeCode(ctx context.Context, codeVal, clientID, redirectUR
 	if !ok {
 		return authCode{}, errors.New("missing code")
 	}
-	if time.Now().After(code.ExpiresAt) {
-		return authCode{}, errors.New("expired code")
-	}
-	if code.ClientID != clientID || code.RedirectURI != redirectURI || code.Resource != resource {
-		return authCode{}, errors.New("code mismatch")
+	if err := validateCodeBinding(code, clientID, redirectURI, resource, codeVerifier, time.Now()); err != nil {
+		return authCode{}, err
 	}
 	delete(s.codes, codeVal)
 	return code, nil
@@ -308,7 +400,7 @@ func (s *Service) validateClient(clientID, redirectURI string) (Client, error) {
 	if !ok {
 		return Client{}, fmt.Errorf("unknown client_id")
 	}
-	if strings.TrimSpace(client.RedirectURI) != redirectURI {
+	if client.ID != clientID || !matchesRedirectURI(client.RedirectURIs, redirectURI, client.TokenEndpointAuthMethod == TokenEndpointAuthMethodNone) {
 		return Client{}, fmt.Errorf("redirect_uri mismatch")
 	}
 	return client, nil

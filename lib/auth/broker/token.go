@@ -33,9 +33,6 @@ func (s *Service) VerifyAccessToken(token, expectedIssuer, expectedResource stri
 	if !validClaimValue(claims.Subject) || !validClaimValue(claims.ClientID) {
 		return VerifiedAccessToken{}, ErrInvalidAccessToken
 	}
-	if _, ok := s.cfg.Clients[claims.ClientID]; !ok {
-		return VerifiedAccessToken{}, ErrInvalidAccessToken
-	}
 	if expectedIssuer != "" && claims.Issuer != expectedIssuer {
 		return VerifiedAccessToken{}, ErrInvalidAccessToken
 	}
