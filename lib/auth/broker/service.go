@@ -20,6 +20,7 @@ type Client struct {
 	Secret                  string
 	RedirectURIs            []string
 	TokenEndpointAuthMethod TokenEndpointAuthMethod
+	ExactRedirectURIs       bool
 }
 
 type TokenEndpointAuthMethod string
@@ -36,6 +37,7 @@ type ServiceConfig struct {
 	Scopes            []string
 	ScopeImplications map[string][]string
 	Clients           map[string]Client
+	ClientResolver    ClientResolver
 	Entitlements      map[string]map[string]struct{}
 	CodeStore         CodeStore
 	CodeTTL           time.Duration
@@ -103,9 +105,7 @@ func (s *Service) AuthorizeHandler() http.Handler {
 			http.Error(w, "client_id and redirect_uri are required", http.StatusBadRequest)
 			return
 		}
-		clientID := strings.TrimSpace(clientIDs[0])
-		redirectURI := strings.TrimSpace(redirectURIs[0])
-		client, err := s.validateClient(clientID, redirectURI)
+		client, redirectURI, err := s.validateClient(r.Context(), clientIDs[0], redirectURIs[0])
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -204,14 +204,14 @@ func (s *Service) TokenHandler() http.Handler {
 			writeTokenError(w, http.StatusUnauthorized, "invalid_client")
 			return
 		}
-		clientID := strings.TrimSpace(clientIDRaw)
+		clientID := clientIDRaw
 		redirectURIRaw, hasRedirectURI := singlePostFormValue(r, "redirect_uri")
 		codeValRaw, hasCode := singlePostFormValue(r, "code")
 		if !hasRedirectURI || !hasCode {
 			writeTokenError(w, http.StatusBadRequest, "invalid_grant")
 			return
 		}
-		redirectURI := strings.TrimSpace(redirectURIRaw)
+		redirectURI := redirectURIRaw
 		codeVal := strings.TrimSpace(codeValRaw)
 		resources, hasResource := r.PostForm["resource"]
 		resource := ""
@@ -223,12 +223,16 @@ func (s *Service) TokenHandler() http.Handler {
 			return
 		}
 
-		client, ok := s.cfg.Clients[clientID]
-		if !ok || client.ID != clientID {
+		client, err := s.resolveClient(r.Context(), clientID)
+		if err != nil {
 			writeTokenError(w, http.StatusUnauthorized, "invalid_client")
 			return
 		}
-		if !matchesRedirectURI(client.RedirectURIs, redirectURI, client.TokenEndpointAuthMethod == TokenEndpointAuthMethodNone) {
+		clientID = client.ID
+		if !client.ExactRedirectURIs {
+			redirectURI = strings.TrimSpace(redirectURI)
+		}
+		if !matchesRedirectURI(client.RedirectURIs, redirectURI, allowsLoopbackPort(client)) {
 			writeTokenError(w, http.StatusBadRequest, "invalid_grant")
 			return
 		}
@@ -392,18 +396,40 @@ func (s *Service) consumeCode(ctx context.Context, codeVal, clientID, redirectUR
 	return code, nil
 }
 
-func (s *Service) validateClient(clientID, redirectURI string) (Client, error) {
-	if clientID == "" || redirectURI == "" {
-		return Client{}, errors.New("client_id and redirect_uri are required")
+func (s *Service) validateClient(ctx context.Context, clientID, redirectURI string) (Client, string, error) {
+	if strings.TrimSpace(clientID) == "" || strings.TrimSpace(redirectURI) == "" {
+		return Client{}, "", errors.New("client_id and redirect_uri are required")
 	}
-	client, ok := s.cfg.Clients[clientID]
-	if !ok {
-		return Client{}, fmt.Errorf("unknown client_id")
+	client, err := s.resolveClient(ctx, clientID)
+	if err != nil {
+		return Client{}, "", fmt.Errorf("unknown client_id")
 	}
-	if client.ID != clientID || !matchesRedirectURI(client.RedirectURIs, redirectURI, client.TokenEndpointAuthMethod == TokenEndpointAuthMethodNone) {
-		return Client{}, fmt.Errorf("redirect_uri mismatch")
+	if !client.ExactRedirectURIs {
+		redirectURI = strings.TrimSpace(redirectURI)
+	}
+	if !matchesRedirectURI(client.RedirectURIs, redirectURI, allowsLoopbackPort(client)) {
+		return Client{}, "", fmt.Errorf("redirect_uri mismatch")
+	}
+	return client, redirectURI, nil
+}
+
+func (s *Service) resolveClient(ctx context.Context, clientID string) (Client, error) {
+	staticClientID := strings.TrimSpace(clientID)
+	if client, ok := s.cfg.Clients[staticClientID]; ok && client.ID == staticClientID {
+		return client, nil
+	}
+	if s.cfg.ClientResolver == nil {
+		return Client{}, errors.New("unknown client")
+	}
+	client, err := s.cfg.ClientResolver.ResolveClient(ctx, clientID)
+	if err != nil || client.ID != clientID {
+		return Client{}, errors.New("unknown client")
 	}
 	return client, nil
+}
+
+func allowsLoopbackPort(client Client) bool {
+	return client.TokenEndpointAuthMethod == TokenEndpointAuthMethodNone && !client.ExactRedirectURIs
 }
 
 func (s *Service) isEntitled(subject, email, clientID string) bool {

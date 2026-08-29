@@ -38,13 +38,14 @@ func TestProductionAssetAndTimeoutEnvironmentLoads(t *testing.T) {
 	profile, err := coreconfig.Load[appConfig](context.Background(), coreconfig.LoadOptions{
 		Prefix: "TISSUES",
 		Environment: coreconfig.MapEnvironment{
-			"TISSUES_SERVER_READ_TIMEOUT":        "60s",
-			"TISSUES_SERVER_WRITE_TIMEOUT":       "60s",
-			"TISSUES_TISSUES_STORAGE_PROJECT_ID": "tissues-dev",
-			"TISSUES_TISSUES_STORAGE_NAMESPACE":  "tissues",
-			"TISSUES_TISSUES_ASSETS_BUCKET":      "tissues-dev-tissues-assets-production",
-			"TISSUES_AUTH_ISSUER_URL":            "https://tissues.example.test",
-			"TISSUES_AUTH_MCP_RESOURCE_URL":      "https://tissues.example.test/mcp",
+			"TISSUES_SERVER_READ_TIMEOUT":           "60s",
+			"TISSUES_SERVER_WRITE_TIMEOUT":          "60s",
+			"TISSUES_TISSUES_STORAGE_PROJECT_ID":    "tissues-dev",
+			"TISSUES_TISSUES_STORAGE_NAMESPACE":     "tissues",
+			"TISSUES_TISSUES_ASSETS_BUCKET":         "tissues-dev-tissues-assets-production",
+			"TISSUES_AUTH_ISSUER_URL":               "https://tissues.example.test",
+			"TISSUES_AUTH_MCP_RESOURCE_URL":         "https://tissues.example.test/mcp",
+			"TISSUES_AUTH_CLIENT_METADATA_URL_LIST": "https://client.example.test/oauth/client.json",
 		},
 	})
 	if err != nil {
@@ -58,6 +59,9 @@ func TestProductionAssetAndTimeoutEnvironmentLoads(t *testing.T) {
 	}
 	if profile.Config.Auth.IssuerURL != "https://tissues.example.test" || profile.Config.Auth.MCPResourceURL != "https://tissues.example.test/mcp" {
 		t.Fatalf("auth canonical URLs = %q / %q", profile.Config.Auth.IssuerURL, profile.Config.Auth.MCPResourceURL)
+	}
+	if profile.Config.Auth.ClientMetadataURLList != "https://client.example.test/oauth/client.json" {
+		t.Fatalf("auth Client Metadata URL list = %q", profile.Config.Auth.ClientMetadataURLList)
 	}
 }
 

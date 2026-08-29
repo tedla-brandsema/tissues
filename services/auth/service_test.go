@@ -16,6 +16,9 @@ func TestInactiveAuthNeedsNoCredentials(t *testing.T) {
 	if err := (Config{}).ValidateConfig(); err != nil {
 		t.Fatal(err)
 	}
+	if err := (Config{ClientMetadataURLList: "http://client.example.test/client.json"}).ValidateConfig(); err == nil {
+		t.Fatal("inactive configuration accepted invalid admitted CIMD URL")
+	}
 }
 
 func validConfig() Config {
@@ -71,6 +74,42 @@ func TestValidLocalAndProductionAuthConfiguration(t *testing.T) {
 	}
 }
 
+func TestClientMetadataURLConfiguration(t *testing.T) {
+	first := "https://client.example.test/oauth/client.json"
+	second := "https://other.example.test:8443/metadata.json"
+	cfg := validConfig()
+	cfg.ClientMetadataURLList = first + "; " + second
+	if err := cfg.ValidateConfig(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := parseClientMetadataURLs(cfg.ClientMetadataURLList)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{first, second}) {
+		t.Fatalf("client metadata URLs = %#v", got)
+	}
+
+	invalid := map[string]string{
+		"http":        "http://client.example.test/client.json",
+		"root":        "https://client.example.test/",
+		"userinfo":    "https://user@client.example.test/client.json",
+		"fragment":    "https://client.example.test/client.json#x",
+		"query":       "https://client.example.test/client.json?x=1",
+		"dot segment": "https://client.example.test/a/../client.json",
+		"duplicate":   first + ";" + first,
+	}
+	for name, raw := range invalid {
+		t.Run(name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.ClientMetadataURLList = raw
+			if err := cfg.ValidateConfig(); err == nil || !strings.Contains(err.Error(), "ClientMetadataURLList") {
+				t.Fatalf("validation error = %v", err)
+			}
+		})
+	}
+}
+
 func TestAuthorizationServerMetadataIsTruthfulAndCanonical(t *testing.T) {
 	cfg := validConfig()
 	rec := httptest.NewRecorder()
@@ -88,7 +127,10 @@ func TestAuthorizationServerMetadataIsTruthfulAndCanonical(t *testing.T) {
 	if !reflect.DeepEqual(got["response_types_supported"], []any{"code"}) || !reflect.DeepEqual(got["grant_types_supported"], []any{"authorization_code"}) || !reflect.DeepEqual(got["token_endpoint_auth_methods_supported"], []any{"none", "client_secret_post"}) || !reflect.DeepEqual(got["code_challenge_methods_supported"], []any{"S256"}) || !reflect.DeepEqual(got["scopes_supported"], []any{ScopeRead, ScopeWrite}) {
 		t.Fatalf("metadata capabilities = %#v", got)
 	}
-	for _, forbidden := range []string{"registration_endpoint", "client_id_metadata_document_supported", "refresh_token", "offline_access"} {
+	if got["client_id_metadata_document_supported"] != true {
+		t.Fatalf("CIMD support = %#v", got["client_id_metadata_document_supported"])
+	}
+	for _, forbidden := range []string{"registration_endpoint", "refresh_token", "offline_access"} {
 		if _, ok := got[forbidden]; ok || strings.Contains(rec.Body.String(), `"`+forbidden+`"`) {
 			t.Fatalf("metadata advertises %q: %s", forbidden, rec.Body.String())
 		}

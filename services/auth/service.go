@@ -47,7 +47,15 @@ func New(profile service.Profile[Config], client *gcds.Client) (*Service, error)
 	if client == nil {
 		return nil, fmt.Errorf("auth Datastore client is required")
 	}
-	brokerService := broker.NewService(broker.ServiceConfig{SigningSecret: []byte(cfg.SigningSecret), Issuer: cfg.IssuerURL, Resource: cfg.MCPResourceURL, Scopes: supportedScopes, ScopeImplications: map[string][]string{ScopeWrite: {ScopeRead}}, Clients: map[string]broker.Client{cfg.ClientID: {ID: cfg.ClientID, Secret: cfg.ClientSecret, RedirectURIs: []string{cfg.ClientRedirectURI}, TokenEndpointAuthMethod: broker.TokenEndpointAuthMethodClientSecretPost}}, Entitlements: parseEntitlements(cfg.Entitlements), CodeStore: broker.NewDatastoreCodeStore(client, cfg.DatastoreNS, cfg.DatastoreKind)})
+	clientMetadataURLs, err := parseClientMetadataURLs(cfg.ClientMetadataURLList)
+	if err != nil {
+		return nil, err
+	}
+	clientResolver, err := broker.NewCIMDResolver(clientMetadataURLs, nil)
+	if err != nil {
+		return nil, err
+	}
+	brokerService := broker.NewService(broker.ServiceConfig{SigningSecret: []byte(cfg.SigningSecret), Issuer: cfg.IssuerURL, Resource: cfg.MCPResourceURL, Scopes: supportedScopes, ScopeImplications: map[string][]string{ScopeWrite: {ScopeRead}}, Clients: map[string]broker.Client{cfg.ClientID: {ID: cfg.ClientID, Secret: cfg.ClientSecret, RedirectURIs: []string{cfg.ClientRedirectURI}, TokenEndpointAuthMethod: broker.TokenEndpointAuthMethodClientSecretPost}}, ClientResolver: clientResolver, Entitlements: parseEntitlements(cfg.Entitlements), CodeStore: broker.NewDatastoreCodeStore(client, cfg.DatastoreNS, cfg.DatastoreKind)})
 	frontend, err := newFrontendHandler(frontendFiles, "/auth/login")
 	if err != nil {
 		return nil, err
@@ -83,6 +91,7 @@ type authorizationServerMetadata struct {
 	CodeChallengeMethodsSupported               []string `json:"code_challenge_methods_supported"`
 	ScopesSupported                             []string `json:"scopes_supported"`
 	AuthorizationResponseIssuerParameterSupport bool     `json:"authorization_response_iss_parameter_supported"`
+	ClientIDMetadataDocumentSupported           bool     `json:"client_id_metadata_document_supported"`
 }
 
 func authorizationServerMetadataHandler(cfg Config) http.Handler {
@@ -96,6 +105,7 @@ func authorizationServerMetadataHandler(cfg Config) http.Handler {
 		CodeChallengeMethodsSupported:               []string{"S256"},
 		ScopesSupported:                             append([]string(nil), supportedScopes...),
 		AuthorizationResponseIssuerParameterSupport: true,
+		ClientIDMetadataDocumentSupported:           true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
