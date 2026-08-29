@@ -95,6 +95,8 @@ func compose(ctx context.Context, profile coreconfig.Profile[appConfig]) (*serve
 	mux := http.NewServeMux()
 	var closers []closeFunc
 	var active []service.Service
+	var authService *authservice.Service
+	var serviceErr error
 	closeOnError := func() {
 		for i := len(closers) - 1; i >= 0; i-- {
 			_ = closers[i]()
@@ -106,7 +108,7 @@ func compose(ctx context.Context, profile coreconfig.Profile[appConfig]) (*serve
 			return nil, nil, fmt.Errorf("create auth Datastore client: %w", clientErr)
 		}
 		closers = append(closers, client.Close)
-		authService, serviceErr := authservice.New(authSlot, client)
+		authService, serviceErr = authservice.New(authSlot, client)
 		if serviceErr != nil {
 			closeOnError()
 			return nil, nil, serviceErr
@@ -136,7 +138,11 @@ func compose(ctx context.Context, profile coreconfig.Profile[appConfig]) (*serve
 			closeOnError()
 			return nil, nil, assetStoreErr
 		}
-		tissuesService, serviceErr := tissues.New(tissuesSlot, repository, assetStore)
+		var tissuesOptions []tissues.Option
+		if authService != nil {
+			tissuesOptions = append(tissuesOptions, tissues.WithMCPAuth(tissuesMCPAuth(profile.Config.Auth, authService.VerifyAccessToken)))
+		}
+		tissuesService, serviceErr := tissues.New(tissuesSlot, repository, assetStore, tissuesOptions...)
 		if serviceErr != nil {
 			closeOnError()
 			return nil, nil, serviceErr
@@ -154,6 +160,22 @@ func compose(ctx context.Context, profile coreconfig.Profile[appConfig]) (*serve
 	}
 	srv.SetMux(mux)
 	return srv, closers, nil
+}
+
+func tissuesMCPAuth(cfg authservice.Config, verify func(string) (authservice.VerifiedAccessToken, error)) tissues.MCPAuth {
+	return tissues.MCPAuth{
+		Issuer: cfg.IssuerURL, Resource: cfg.MCPResourceURL,
+		Verify: func(_ context.Context, token string) (tissues.MCPVerifiedToken, error) {
+			verified, err := verify(token)
+			if err != nil {
+				return tissues.MCPVerifiedToken{}, err
+			}
+			return tissues.MCPVerifiedToken{
+				Subject: verified.Subject, Email: verified.Email, ClientID: verified.ClientID,
+				Scopes: append([]string(nil), verified.Scopes...), ExpiresAt: verified.ExpiresAt,
+			}, nil
+		},
+	}
 }
 
 func registerServices(mux *http.ServeMux, active []service.Service) error {

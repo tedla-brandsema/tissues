@@ -22,6 +22,8 @@ type Service struct {
 	newID      IDGenerator
 	imageSlots chan struct{}
 	process    imageProcessor
+	mcpAuth    *MCPAuth
+	mcp        *mcpRoutes
 }
 
 var _ service.Service = (*Service)(nil)
@@ -55,6 +57,13 @@ func New(profile service.Profile[Config], repo Repository, assets AssetStore, op
 		if option != nil {
 			option(svc)
 		}
+	}
+	if svc.mcpAuth != nil {
+		routes, err := svc.newMCPRoutes(*svc.mcpAuth)
+		if err != nil {
+			return nil, err
+		}
+		svc.mcp = routes
 	}
 	return svc, nil
 }

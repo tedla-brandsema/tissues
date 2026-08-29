@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -31,6 +32,37 @@ func TestConcreteServicesShareSDK(t *testing.T) {
 	active := []service.Service{(*authservice.Service)(nil), (*tissues.Service)(nil)}
 	if len(active) != 2 {
 		t.Fatalf("active services = %d, want 2", len(active))
+	}
+}
+
+func TestTissuesMCPAuthWiresCanonicalIdentityAndVerifier(t *testing.T) {
+	wantErr := errors.New("rejected")
+	called := ""
+	cfg := authservice.Config{IssuerURL: "https://auth.example.test", MCPResourceURL: "https://tissues.example.test/mcp"}
+	bridge := tissuesMCPAuth(cfg, func(token string) (authservice.VerifiedAccessToken, error) {
+		called = token
+		if token == "bad" {
+			return authservice.VerifiedAccessToken{}, wantErr
+		}
+		return authservice.VerifiedAccessToken{
+			Subject: "subject-1", Email: "person@example.test", ClientID: "client-1",
+			Scopes: []string{authservice.ScopeRead}, ExpiresAt: time.Unix(1234, 0),
+		}, nil
+	})
+	if bridge.Issuer != cfg.IssuerURL || bridge.Resource != cfg.MCPResourceURL || bridge.Verify == nil {
+		t.Fatalf("bridge = %#v", bridge)
+	}
+	verified, err := bridge.Verify(context.Background(), "good")
+	if err != nil || called != "good" || verified.Subject != "subject-1" || verified.Email != "person@example.test" || verified.ClientID != "client-1" || !reflect.DeepEqual(verified.Scopes, []string{authservice.ScopeRead}) || !verified.ExpiresAt.Equal(time.Unix(1234, 0)) {
+		t.Fatalf("verified=%#v called=%q err=%v", verified, called, err)
+	}
+	verified.Scopes[0] = "mutated"
+	again, err := bridge.Verify(context.Background(), "good")
+	if err != nil || again.Scopes[0] != authservice.ScopeRead {
+		t.Fatalf("bridge did not copy scopes: %#v err=%v", again, err)
+	}
+	if _, err := bridge.Verify(context.Background(), "bad"); !errors.Is(err, wantErr) {
+		t.Fatalf("error=%v", err)
 	}
 }
 

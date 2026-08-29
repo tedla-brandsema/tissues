@@ -3,9 +3,11 @@ package auth
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	gcds "cloud.google.com/go/datastore"
 	"github.com/tedla-brandsema/tissues/lib/auth/broker"
@@ -26,6 +28,35 @@ type Service struct {
 	profile service.Profile[Config]
 	broker  *broker.Service
 	login   http.Handler
+}
+
+// VerifiedAccessToken is the broker-neutral access-token identity exposed to
+// relying Services. Transport-specific authentication types stay at the
+// relying Service boundary.
+type VerifiedAccessToken struct {
+	Subject   string
+	Email     string
+	ClientID  string
+	Scopes    []string
+	ExpiresAt time.Time
+}
+
+// ErrInvalidAccessToken identifies a token that cannot be used for this
+// Service's configured issuer and MCP resource.
+var ErrInvalidAccessToken = errors.New("invalid access token")
+
+// VerifyAccessToken verifies a bearer token against the active canonical
+// issuer and MCP resource.
+func (s *Service) VerifyAccessToken(token string) (VerifiedAccessToken, error) {
+	cfg := s.profile.Current().Config
+	verified, err := s.broker.VerifyAccessToken(token, cfg.IssuerURL, cfg.MCPResourceURL)
+	if err != nil {
+		return VerifiedAccessToken{}, ErrInvalidAccessToken
+	}
+	return VerifiedAccessToken{
+		Subject: verified.Subject, Email: verified.Email, ClientID: verified.ClientID,
+		Scopes: append([]string(nil), verified.Scopes...), ExpiresAt: verified.ExpiresAt,
+	}, nil
 }
 
 var _ service.Service = (*Service)(nil)

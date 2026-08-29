@@ -2,14 +2,17 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tedla-brandsema/tissues/lib/auth/broker"
 	coreconfig "github.com/tedla-brandsema/tissues/lib/core/config"
+	corecrypto "github.com/tedla-brandsema/tissues/lib/core/crypto"
 )
 
 func TestInactiveAuthNeedsNoCredentials(t *testing.T) {
@@ -161,6 +164,60 @@ func TestAuthorizationServerMetadataRouteIsRegisteredAndGETOnly(t *testing.T) {
 	mux.ServeHTTP(post, httptest.NewRequest(http.MethodPost, "/.well-known/oauth-authorization-server", nil))
 	if post.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST status = %d, want 405", post.Code)
+	}
+}
+
+func TestServiceVerifyAccessTokenBindsCanonicalIssuerAndMCPResource(t *testing.T) {
+	cfg := validConfig()
+	profile, err := coreconfig.NewServiceProfile("test", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot, err := coreconfig.NewSlot(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brokerService := broker.NewService(broker.ServiceConfig{
+		SigningSecret: []byte(cfg.SigningSecret), Issuer: cfg.IssuerURL, Resource: cfg.MCPResourceURL,
+		Scopes: supportedScopes, ScopeImplications: map[string][]string{ScopeWrite: {ScopeRead}},
+	})
+	svc := &Service{profile: slot, broker: brokerService}
+	now := time.Now().UTC().Truncate(time.Second)
+	tokenFor := func(issuer, resource string) string {
+		t.Helper()
+		token, encodeErr := corecrypto.EncodeSigned(map[string]any{
+			"iss": issuer, "aud": resource, "sub": "subject-1", "email": "person@example.test",
+			"client_id": "client-1", "scope": "tissues:read tissues:write", "iat": now.Unix(), "exp": now.Add(time.Hour).Unix(),
+		}, []byte(cfg.SigningSecret))
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		return token
+	}
+	verified, err := svc.VerifyAccessToken(tokenFor(cfg.IssuerURL, cfg.MCPResourceURL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.Subject != "subject-1" || verified.Email != "person@example.test" || verified.ClientID != "client-1" || !reflect.DeepEqual(verified.Scopes, []string{ScopeRead, ScopeWrite}) || !verified.ExpiresAt.Equal(now.Add(time.Hour)) {
+		t.Fatalf("verified = %#v", verified)
+	}
+	verified.Scopes[0] = "mutated"
+	again, err := svc.VerifyAccessToken(tokenFor(cfg.IssuerURL, cfg.MCPResourceURL))
+	if err != nil || again.Scopes[0] != ScopeRead {
+		t.Fatalf("scopes were not copied: %#v err=%v", again, err)
+	}
+	for name, token := range map[string]string{
+		"wrong issuer":   tokenFor("https://other.example.test", cfg.MCPResourceURL),
+		"wrong resource": tokenFor(cfg.IssuerURL, "https://other.example.test/mcp"),
+		"resource-less":  tokenFor(cfg.IssuerURL, ""),
+		"malformed":      "secret-token-value",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, verifyErr := svc.VerifyAccessToken(token)
+			if !errors.Is(verifyErr, ErrInvalidAccessToken) || strings.Contains(verifyErr.Error(), token) {
+				t.Fatalf("error=%v", verifyErr)
+			}
+		})
 	}
 }
 

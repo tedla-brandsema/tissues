@@ -32,6 +32,13 @@ func (s *Service) RegisterRoutes(mux *http.ServeMux) error {
 	root := secureBrowserHandler(s.browserRootHandler(frontend, cfg.Enabled))
 	assets := secureBrowserHandler(http.StripPrefix("/tissues/", http.FileServer(http.FS(frontend))))
 	mux.Handle("GET "+assetPath, assets)
+	if s.mcp != nil {
+		for _, path := range []string{"/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"} {
+			mux.Handle("GET "+path, s.mcp.metadata)
+			mux.Handle("OPTIONS "+path, s.mcp.metadata)
+		}
+		mux.Handle("POST "+mcpPath, s.mcp.endpoint)
+	}
 
 	api := s.apiHandler()
 	if !cfg.Enabled {
