@@ -22,7 +22,7 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.6 // indirect
 	github.com/googleapis/gax-go/v2 v2.15.0 // indirect
 	github.com/tedla-brandsema/tagex v0.5.0 // indirect
-	github.com/tedla-brandsema/tissues/lib/core v0.0.0 // indirect
+	github.com/tedla-brandsema/tissues/lib/core v0.0.0
 	github.com/tedla-brandsema/valex v0.3.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.61.0 // indirect
