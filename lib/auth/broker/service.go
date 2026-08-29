@@ -22,12 +22,16 @@ type Client struct {
 }
 
 type ServiceConfig struct {
-	SigningSecret []byte
-	Clients       map[string]Client
-	Entitlements  map[string]map[string]struct{}
-	CodeStore     CodeStore
-	CodeTTL       time.Duration
-	TokenTTL      time.Duration
+	SigningSecret     []byte
+	Issuer            string
+	Resource          string
+	Scopes            []string
+	ScopeImplications map[string][]string
+	Clients           map[string]Client
+	Entitlements      map[string]map[string]struct{}
+	CodeStore         CodeStore
+	CodeTTL           time.Duration
+	TokenTTL          time.Duration
 }
 
 type Service struct {
@@ -41,20 +45,25 @@ type authCode struct {
 	Email       string
 	ClientID    string
 	RedirectURI string
+	Resource    string
+	Scopes      []string
 	ExpiresAt   time.Time
 }
 
 type accessToken struct {
+	Issuer    string `json:"iss"`
+	Resource  string `json:"aud,omitempty"`
 	Subject   string `json:"sub"`
 	Email     string `json:"email,omitempty"`
 	ClientID  string `json:"client_id"`
+	Scope     string `json:"scope,omitempty"`
 	ExpiresAt int64  `json:"exp"`
 	IssuedAt  int64  `json:"iat"`
 }
 
 type CodeStore interface {
 	SaveCode(ctx context.Context, code string, val authCode) error
-	ConsumeCode(ctx context.Context, code, clientID, redirectURI string) (authCode, error)
+	ConsumeCode(ctx context.Context, code, clientID, redirectURI, resource string) (authCode, error)
 }
 
 func NewService(cfg ServiceConfig) *Service {
@@ -85,6 +94,31 @@ func (s *Service) AuthorizeHandler() http.Handler {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		query := r.URL.Query()
+		responseTypes, hasResponseType := query["response_type"]
+		if !hasResponseType || len(responseTypes) != 1 || responseTypes[0] == "" {
+			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "invalid_request")
+			return
+		}
+		if responseTypes[0] != "code" {
+			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "unsupported_response_type")
+			return
+		}
+		resources, hasResource := query["resource"]
+		resource := query.Get("resource")
+		if hasResource && (len(resources) != 1 || resource == "" || resource != s.cfg.Resource) {
+			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "invalid_target")
+			return
+		}
+		if scopesRaw, ok := query["scope"]; ok && len(scopesRaw) != 1 {
+			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "invalid_scope")
+			return
+		}
+		scopes, err := canonicalScopes(query.Get("scope"), s.cfg.Scopes, s.cfg.ScopeImplications)
+		if err != nil || (query.Has("scope") && len(scopes) == 0) {
+			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "invalid_scope")
+			return
+		}
 
 		subject, ok := gcpauth.SubjectFromContext(r.Context())
 		if !ok || subject == "" {
@@ -95,11 +129,11 @@ func (s *Service) AuthorizeHandler() http.Handler {
 
 		if !s.isEntitled(subject, email, client.ID) {
 			slog.Warn("auth broker access denied", "subject", subject, "email", email, "client_id", client.ID)
-			redirectWithError(w, r, redirectURI, state, "access_denied")
+			redirectWithError(w, r, redirectURI, state, s.cfg.Issuer, "access_denied")
 			return
 		}
 
-		code, err := s.issueCode(r.Context(), subject, email, client.ID, redirectURI)
+		code, err := s.issueCode(r.Context(), subject, email, client.ID, redirectURI, resource, scopes)
 		if err != nil {
 			http.Error(w, "failed to issue code", http.StatusInternalServerError)
 			return
@@ -108,6 +142,7 @@ func (s *Service) AuthorizeHandler() http.Handler {
 		u, _ := url.Parse(redirectURI)
 		q := u.Query()
 		q.Set("code", code)
+		q.Set("iss", s.cfg.Issuer)
 		if state != "" {
 			q.Set("state", state)
 		}
@@ -135,6 +170,12 @@ func (s *Service) TokenHandler() http.Handler {
 		clientSecret := strings.TrimSpace(r.FormValue("client_secret"))
 		redirectURI := strings.TrimSpace(r.FormValue("redirect_uri"))
 		codeVal := strings.TrimSpace(r.FormValue("code"))
+		resources, hasResource := r.PostForm["resource"]
+		resource := r.PostFormValue("resource")
+		if hasResource && (len(resources) != 1 || resource == "") {
+			http.Error(w, "invalid_grant", http.StatusBadRequest)
+			return
+		}
 
 		client, err := s.validateClient(clientID, redirectURI)
 		if err != nil {
@@ -146,7 +187,7 @@ func (s *Service) TokenHandler() http.Handler {
 			return
 		}
 
-		code, err := s.consumeCode(r.Context(), codeVal, clientID, redirectURI)
+		code, err := s.consumeCode(r.Context(), codeVal, clientID, redirectURI, resource)
 		if err != nil {
 			http.Error(w, "invalid_grant", http.StatusBadRequest)
 			return
@@ -154,9 +195,12 @@ func (s *Service) TokenHandler() http.Handler {
 
 		now := time.Now()
 		tok := accessToken{
+			Issuer:    s.cfg.Issuer,
+			Resource:  code.Resource,
 			Subject:   code.Subject,
 			Email:     code.Email,
 			ClientID:  clientID,
+			Scope:     strings.Join(code.Scopes, " "),
 			IssuedAt:  now.Unix(),
 			ExpiresAt: now.Add(s.cfg.TokenTTL).Unix(),
 		}
@@ -166,11 +210,15 @@ func (s *Service) TokenHandler() http.Handler {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, map[string]any{
+		response := map[string]any{
 			"access_token": accessTokenRaw,
 			"token_type":   "Bearer",
 			"expires_in":   int64(s.cfg.TokenTTL / time.Second),
-		})
+		}
+		if tok.Scope != "" {
+			response["scope"] = tok.Scope
+		}
+		writeJSON(w, http.StatusOK, response)
 	})
 }
 
@@ -186,12 +234,12 @@ func (s *Service) UserinfoHandler() http.Handler {
 			return
 		}
 
-		var claims accessToken
-		if err := decodeSigned(token, s.cfg.SigningSecret, &claims); err != nil {
+		claims, err := s.VerifyAccessToken(token, s.cfg.Issuer, "")
+		if err != nil {
 			http.Error(w, "invalid_token", http.StatusUnauthorized)
 			return
 		}
-		if time.Now().Unix() > claims.ExpiresAt {
+		if time.Now().After(claims.ExpiresAt) {
 			http.Error(w, "expired_token", http.StatusUnauthorized)
 			return
 		}
@@ -200,12 +248,12 @@ func (s *Service) UserinfoHandler() http.Handler {
 			"sub":       claims.Subject,
 			"email":     claims.Email,
 			"client_id": claims.ClientID,
-			"exp":       claims.ExpiresAt,
+			"exp":       claims.ExpiresAt.Unix(),
 		})
 	})
 }
 
-func (s *Service) issueCode(ctx context.Context, subject, email, clientID, redirectURI string) (string, error) {
+func (s *Service) issueCode(ctx context.Context, subject, email, clientID, redirectURI, resource string, scopes []string) (string, error) {
 	codeVal, err := randomToken(32)
 	if err != nil {
 		return "", err
@@ -215,6 +263,8 @@ func (s *Service) issueCode(ctx context.Context, subject, email, clientID, redir
 		Email:       email,
 		ClientID:    clientID,
 		RedirectURI: redirectURI,
+		Resource:    resource,
+		Scopes:      append([]string(nil), scopes...),
 		ExpiresAt:   time.Now().Add(s.cfg.CodeTTL),
 	}
 	if s.cfg.CodeStore != nil {
@@ -229,9 +279,9 @@ func (s *Service) issueCode(ctx context.Context, subject, email, clientID, redir
 	return codeVal, nil
 }
 
-func (s *Service) consumeCode(ctx context.Context, codeVal, clientID, redirectURI string) (authCode, error) {
+func (s *Service) consumeCode(ctx context.Context, codeVal, clientID, redirectURI, resource string) (authCode, error) {
 	if s.cfg.CodeStore != nil {
-		return s.cfg.CodeStore.ConsumeCode(ctx, codeVal, clientID, redirectURI)
+		return s.cfg.CodeStore.ConsumeCode(ctx, codeVal, clientID, redirectURI, resource)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -240,13 +290,13 @@ func (s *Service) consumeCode(ctx context.Context, codeVal, clientID, redirectUR
 	if !ok {
 		return authCode{}, errors.New("missing code")
 	}
-	delete(s.codes, codeVal)
 	if time.Now().After(code.ExpiresAt) {
 		return authCode{}, errors.New("expired code")
 	}
-	if code.ClientID != clientID || code.RedirectURI != redirectURI {
+	if code.ClientID != clientID || code.RedirectURI != redirectURI || code.Resource != resource {
 		return authCode{}, errors.New("code mismatch")
 	}
+	delete(s.codes, codeVal)
 	return code, nil
 }
 
@@ -300,7 +350,7 @@ func bearerToken(header string) (string, bool) {
 	return tok, true
 }
 
-func redirectWithError(w http.ResponseWriter, r *http.Request, redirectURI, state, code string) {
+func redirectWithError(w http.ResponseWriter, r *http.Request, redirectURI, state, issuer, code string) {
 	u, err := url.Parse(redirectURI)
 	if err != nil {
 		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
@@ -308,6 +358,7 @@ func redirectWithError(w http.ResponseWriter, r *http.Request, redirectURI, stat
 	}
 	q := u.Query()
 	q.Set("error", code)
+	q.Set("iss", issuer)
 	if state != "" {
 		q.Set("state", state)
 	}

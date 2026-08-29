@@ -36,6 +36,34 @@ func TestRelyingPartyCookiesAreSecureByDefault(t *testing.T) {
 	}
 }
 
+func TestRelyingPartyLoginRequestsExactlyOneAuthorizationCodeResponseType(t *testing.T) {
+	rp := NewRP(RPConfig{
+		BrokerURL:   "https://auth.example.test",
+		ClientID:    "tissues",
+		RedirectURI: "https://tissues.example.test/auth/callback",
+		Secret:      []byte("test-only-secret"),
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "https://tissues.example.test/auth/login?next=%2F", nil)
+	rp.LoginHandler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusFound)
+	}
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := location.Query()["response_type"]; len(got) != 1 || got[0] != "code" {
+		t.Fatalf("response_type = %v, want exactly [code]", got)
+	}
+	if location.Query().Get("client_id") != "tissues" || location.Query().Get("redirect_uri") != "https://tissues.example.test/auth/callback" || location.Query().Get("state") == "" {
+		t.Fatalf("authorization query = %v", location.Query())
+	}
+	if location.Query().Has("resource") || location.Query().Has("scope") {
+		t.Fatalf("browser authorization unexpectedly requests resource/scope: %v", location.Query())
+	}
+}
+
 func TestRelyingPartyCallbackPreservesExactURLAndIdentity(t *testing.T) {
 	client := &http.Client{Transport: rpRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body := map[string]string{"access_token": "token"}

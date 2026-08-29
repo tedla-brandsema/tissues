@@ -25,11 +25,13 @@ type DatastoreCodeStore struct {
 }
 
 type codeEntity struct {
-	Subject     string `datastore:"subject"`
-	Email       string `datastore:"email"`
-	ClientID    string `datastore:"client_id"`
-	RedirectURI string `datastore:"redirect_uri,noindex"`
-	ExpiresUnix int64  `datastore:"expires_unix"`
+	Subject     string   `datastore:"subject"`
+	Email       string   `datastore:"email"`
+	ClientID    string   `datastore:"client_id"`
+	RedirectURI string   `datastore:"redirect_uri,noindex"`
+	Resource    string   `datastore:"resource,noindex"`
+	Scopes      []string `datastore:"scopes"`
+	ExpiresUnix int64    `datastore:"expires_unix"`
 }
 
 func NewDatastoreCodeStore(client *gcds.Client, namespace, kind string) *DatastoreCodeStore {
@@ -47,18 +49,24 @@ func (s *DatastoreCodeStore) SaveCode(ctx context.Context, code string, val auth
 	if s == nil || s.client == nil {
 		return errors.New("datastore code store is not initialized")
 	}
-	ent := codeEntity{
-		Subject:     val.Subject,
-		Email:       val.Email,
-		ClientID:    val.ClientID,
-		RedirectURI: val.RedirectURI,
-		ExpiresUnix: val.ExpiresAt.Unix(),
-	}
+	ent := newCodeEntity(val)
 	_, err := s.client.Put(ctx, s.key(code), &ent)
 	return err
 }
 
-func (s *DatastoreCodeStore) ConsumeCode(ctx context.Context, code, clientID, redirectURI string) (authCode, error) {
+func newCodeEntity(val authCode) codeEntity {
+	return codeEntity{
+		Subject:     val.Subject,
+		Email:       val.Email,
+		ClientID:    val.ClientID,
+		RedirectURI: val.RedirectURI,
+		Resource:    val.Resource,
+		Scopes:      append([]string(nil), val.Scopes...),
+		ExpiresUnix: val.ExpiresAt.Unix(),
+	}
+}
+
+func (s *DatastoreCodeStore) ConsumeCode(ctx context.Context, code, clientID, redirectURI, resource string) (authCode, error) {
 	if s == nil || s.client == nil {
 		return authCode{}, errors.New("datastore code store is not initialized")
 	}
@@ -74,24 +82,36 @@ func (s *DatastoreCodeStore) ConsumeCode(ctx context.Context, code, clientID, re
 			return err
 		}
 
-		_ = tx.Delete(key)
-
-		if time.Now().Unix() > ent.ExpiresUnix {
-			return ErrCodeExpired
+		var consumeErr error
+		out, consumeErr = consumeCodeEntity(ent, clientID, redirectURI, resource, time.Now())
+		if consumeErr != nil {
+			return consumeErr
 		}
-		if ent.ClientID != clientID || ent.RedirectURI != redirectURI {
-			return ErrCodeMismatch
-		}
-		out = authCode{
-			Subject:     ent.Subject,
-			Email:       ent.Email,
-			ClientID:    ent.ClientID,
-			RedirectURI: ent.RedirectURI,
-			ExpiresAt:   time.Unix(ent.ExpiresUnix, 0),
-		}
-		return nil
+		return tx.Delete(key)
 	})
 	return out, err
+}
+
+func consumeCodeEntity(ent codeEntity, clientID, redirectURI, resource string, now time.Time) (authCode, error) {
+	if now.Unix() > ent.ExpiresUnix {
+		return authCode{}, ErrCodeExpired
+	}
+	if ent.ClientID != clientID || ent.RedirectURI != redirectURI || ent.Resource != resource {
+		return authCode{}, ErrCodeMismatch
+	}
+	return ent.authorizationCode(), nil
+}
+
+func (ent codeEntity) authorizationCode() authCode {
+	return authCode{
+		Subject:     ent.Subject,
+		Email:       ent.Email,
+		ClientID:    ent.ClientID,
+		RedirectURI: ent.RedirectURI,
+		Resource:    ent.Resource,
+		Scopes:      append([]string(nil), ent.Scopes...),
+		ExpiresAt:   time.Unix(ent.ExpiresUnix, 0),
+	}
 }
 
 func (s *DatastoreCodeStore) key(code string) *gcds.Key {

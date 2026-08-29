@@ -43,6 +43,8 @@ func TestProductionAssetAndTimeoutEnvironmentLoads(t *testing.T) {
 			"TISSUES_TISSUES_STORAGE_PROJECT_ID": "tissues-dev",
 			"TISSUES_TISSUES_STORAGE_NAMESPACE":  "tissues",
 			"TISSUES_TISSUES_ASSETS_BUCKET":      "tissues-dev-tissues-assets-production",
+			"TISSUES_AUTH_ISSUER_URL":            "https://tissues.example.test",
+			"TISSUES_AUTH_MCP_RESOURCE_URL":      "https://tissues.example.test/mcp",
 		},
 	})
 	if err != nil {
@@ -53,6 +55,9 @@ func TestProductionAssetAndTimeoutEnvironmentLoads(t *testing.T) {
 	}
 	if got := profile.Config.Tissues.Assets.Bucket; got != "tissues-dev-tissues-assets-production" {
 		t.Fatalf("asset bucket = %q", got)
+	}
+	if profile.Config.Auth.IssuerURL != "https://tissues.example.test" || profile.Config.Auth.MCPResourceURL != "https://tissues.example.test/mcp" {
+		t.Fatalf("auth canonical URLs = %q / %q", profile.Config.Auth.IssuerURL, profile.Config.Auth.MCPResourceURL)
 	}
 }
 

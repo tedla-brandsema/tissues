@@ -11,6 +11,8 @@ import (
 type Config struct {
 	service.Contribution
 	Enabled           bool   `cfg:"bool,default=false,restart=true"`
+	IssuerURL         string `cfg:"string,restart=true"`
+	MCPResourceURL    string `cfg:"string,restart=true"`
 	SigningSecret     string `cfg:"string,secret=true,restart=true"`
 	ClientID          string `cfg:"string,default=tissues,restart=true"`
 	ClientSecret      string `cfg:"string,secret=true,restart=true"`
@@ -33,6 +35,12 @@ func (cfg Config) ValidateConfig() error {
 	if len(cfg.SigningSecret) < 32 {
 		return fmt.Errorf("SigningSecret must be at least 32 bytes")
 	}
+	if err := validateIssuerURL(cfg.IssuerURL); err != nil {
+		return err
+	}
+	if err := validateMCPResourceURL(cfg.MCPResourceURL); err != nil {
+		return err
+	}
 	for path, value := range map[string]string{"ClientSecret": cfg.ClientSecret, "ProjectID": cfg.ProjectID, "IdentityAPIKey": cfg.IdentityAPIKey} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s must not be empty", path)
@@ -41,6 +49,22 @@ func (cfg Config) ValidateConfig() error {
 	parsed, err := url.Parse(cfg.ClientRedirectURI)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return fmt.Errorf("ClientRedirectURI must be an absolute HTTP or HTTPS URL")
+	}
+	return nil
+}
+
+func validateIssuerURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return fmt.Errorf("IssuerURL must be an absolute HTTP or HTTPS origin without path, query, fragment, or user information")
+	}
+	return nil
+}
+
+func validateMCPResourceURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.Path != "/mcp" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return fmt.Errorf("MCPResourceURL must be an absolute HTTP or HTTPS URL with path /mcp and no query, fragment, or user information")
 	}
 	return nil
 }

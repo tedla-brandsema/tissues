@@ -51,6 +51,8 @@ server:
 
 auth:
   enabled: true
+  issuer_url: ${ORIGIN}
+  mcp_resource_url: ${ORIGIN}/mcp
   client_id: tissues
   client_redirect_uri: ${ORIGIN}/tissues/auth/callback
   project_id: ${PROJECT_ID}

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,6 +12,13 @@ import (
 	gcpauth "github.com/tedla-brandsema/tissues/lib/gcp/auth"
 	"github.com/tedla-brandsema/tissues/lib/service"
 )
+
+const (
+	ScopeRead  = "tissues:read"
+	ScopeWrite = "tissues:write"
+)
+
+var supportedScopes = []string{ScopeRead, ScopeWrite}
 
 // Service is an in-process component; it owns auth behavior, routes, and its
 // frontend, but no listener, PORT, signals, or deployment lifecycle.
@@ -39,7 +47,7 @@ func New(profile service.Profile[Config], client *gcds.Client) (*Service, error)
 	if client == nil {
 		return nil, fmt.Errorf("auth Datastore client is required")
 	}
-	brokerService := broker.NewService(broker.ServiceConfig{SigningSecret: []byte(cfg.SigningSecret), Clients: map[string]broker.Client{cfg.ClientID: {ID: cfg.ClientID, Secret: cfg.ClientSecret, RedirectURI: cfg.ClientRedirectURI}}, Entitlements: parseEntitlements(cfg.Entitlements), CodeStore: broker.NewDatastoreCodeStore(client, cfg.DatastoreNS, cfg.DatastoreKind)})
+	brokerService := broker.NewService(broker.ServiceConfig{SigningSecret: []byte(cfg.SigningSecret), Issuer: cfg.IssuerURL, Resource: cfg.MCPResourceURL, Scopes: supportedScopes, ScopeImplications: map[string][]string{ScopeWrite: {ScopeRead}}, Clients: map[string]broker.Client{cfg.ClientID: {ID: cfg.ClientID, Secret: cfg.ClientSecret, RedirectURI: cfg.ClientRedirectURI}}, Entitlements: parseEntitlements(cfg.Entitlements), CodeStore: broker.NewDatastoreCodeStore(client, cfg.DatastoreNS, cfg.DatastoreKind)})
 	frontend, err := newFrontendHandler(frontendFiles, "/auth/login")
 	if err != nil {
 		return nil, err
@@ -58,10 +66,40 @@ func (s *Service) RegisterRoutes(mux *http.ServeMux) error {
 	mux.Handle("GET /authorize", gcpauth.Middleware([]byte(cfg.SigningSecret), "/auth/login")(s.broker.AuthorizeHandler()))
 	mux.Handle("POST /token", s.broker.TokenHandler())
 	mux.Handle("GET /userinfo", s.broker.UserinfoHandler())
+	mux.Handle("GET /.well-known/oauth-authorization-server", authorizationServerMetadataHandler(cfg))
 	mux.Handle("/auth/login", s.login)
 	mux.Handle("/auth/login/", s.login)
 	mux.Handle("GET /auth/logout", gcpauth.LogoutHandler("/auth/login", cfg.InsecureCookie))
 	return nil
+}
+
+type authorizationServerMetadata struct {
+	Issuer                                      string   `json:"issuer"`
+	AuthorizationEndpoint                       string   `json:"authorization_endpoint"`
+	TokenEndpoint                               string   `json:"token_endpoint"`
+	ResponseTypesSupported                      []string `json:"response_types_supported"`
+	GrantTypesSupported                         []string `json:"grant_types_supported"`
+	TokenEndpointAuthMethodsSupported           []string `json:"token_endpoint_auth_methods_supported"`
+	ScopesSupported                             []string `json:"scopes_supported"`
+	AuthorizationResponseIssuerParameterSupport bool     `json:"authorization_response_iss_parameter_supported"`
+}
+
+func authorizationServerMetadataHandler(cfg Config) http.Handler {
+	metadata := authorizationServerMetadata{
+		Issuer:                            cfg.IssuerURL,
+		AuthorizationEndpoint:             cfg.IssuerURL + "/authorize",
+		TokenEndpoint:                     cfg.IssuerURL + "/token",
+		ResponseTypesSupported:            []string{"code"},
+		GrantTypesSupported:               []string{"authorization_code"},
+		TokenEndpointAuthMethodsSupported: []string{"client_secret_post"},
+		ScopesSupported:                   append([]string(nil), supportedScopes...),
+		AuthorizationResponseIssuerParameterSupport: true,
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(metadata)
+	})
 }
 
 func parseEntitlements(raw string) map[string]map[string]struct{} {

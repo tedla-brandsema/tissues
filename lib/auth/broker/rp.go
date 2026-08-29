@@ -127,6 +127,7 @@ func (rp *RP) LoginHandler() http.Handler {
 		q := u.Query()
 		q.Set("client_id", rp.cfg.ClientID)
 		q.Set("redirect_uri", rp.cfg.RedirectURI)
+		q.Set("response_type", "code")
 		q.Set("state", nonce)
 		u.RawQuery = q.Encode()
 		http.Redirect(w, r, u.String(), http.StatusFound)
