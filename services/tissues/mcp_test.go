@@ -143,30 +143,51 @@ func TestMCPDiscoveryAndToolListContract(t *testing.T) {
 
 	listed := doMCPRequest(t, mux, "tools/list", "", nil, "read")
 	tools := mcpResult(t, listed)["tools"].([]any)
-	if len(tools) != len(mcpToolCatalog) {
+	wantPolicies := map[string]struct {
+		scope                      string
+		readOnly, destructive      bool
+		idempotent, destructiveSet bool
+	}{
+		"list_projects":     {scope: mcpScopeRead, readOnly: true, idempotent: true},
+		"get_project":       {scope: mcpScopeRead, readOnly: true, idempotent: true},
+		"list_issues":       {scope: mcpScopeRead, readOnly: true, idempotent: true},
+		"get_issue":         {scope: mcpScopeRead, readOnly: true, idempotent: true},
+		"list_issue_images": {scope: mcpScopeRead, readOnly: true, idempotent: true},
+		"create_project":    {scope: mcpScopeWrite, destructiveSet: true},
+		"create_issue":      {scope: mcpScopeWrite, destructiveSet: true},
+		"update_issue":      {scope: mcpScopeWrite, destructive: true, idempotent: true, destructiveSet: true},
+		"set_issue_parent":  {scope: mcpScopeWrite, destructive: true, idempotent: true, destructiveSet: true},
+		"close_issue":       {scope: mcpScopeWrite, destructive: true, idempotent: true, destructiveSet: true},
+		"reopen_issue":      {scope: mcpScopeWrite, destructive: true, idempotent: true, destructiveSet: true},
+		"add_comment":       {scope: mcpScopeWrite, destructiveSet: true},
+		"edit_comment":      {scope: mcpScopeWrite, destructive: true, idempotent: true, destructiveSet: true},
+	}
+	if len(tools) != len(wantPolicies) || len(mcpToolCatalog) != len(wantPolicies) {
 		t.Fatalf("tool count=%d tools=%#v", len(tools), tools)
 	}
-	wantNames := make([]string, 0, len(mcpToolCatalog))
-	for _, spec := range mcpToolCatalog {
-		wantNames = append(wantNames, spec.Name)
-	}
-	var names []string
+	seen := make(map[string]bool, len(tools))
 	for _, raw := range tools {
 		tool := raw.(map[string]any)
-		names = append(names, tool["name"].(string))
+		name := tool["name"].(string)
+		policy, ok := wantPolicies[name]
+		if !ok || seen[name] {
+			t.Fatalf("unexpected or duplicate tool %q", name)
+		}
+		seen[name] = true
 		if tool["title"] == "" || tool["description"] == "" || tool["inputSchema"] == nil || tool["outputSchema"] == nil {
 			t.Fatalf("incomplete tool = %#v", tool)
 		}
 		annotations := tool["annotations"].(map[string]any)
-		if annotations["readOnlyHint"] != true || annotations["idempotentHint"] != true || annotations["openWorldHint"] != false {
-			t.Fatalf("annotations = %#v", annotations)
+		if annotations["readOnlyHint"] != policy.readOnly || annotations["idempotentHint"] != policy.idempotent || annotations["openWorldHint"] != false {
+			t.Fatalf("%s annotations = %#v", name, annotations)
 		}
-		if _, exists := annotations["destructiveHint"]; exists {
-			t.Fatalf("unexpected destructive annotation = %#v", annotations)
+		destructive, destructiveSet := annotations["destructiveHint"]
+		if destructiveSet != policy.destructiveSet || destructiveSet && destructive != policy.destructive {
+			t.Fatalf("%s destructive annotation = %#v", name, annotations)
 		}
-		wantSecurity := []any{map[string]any{"type": "oauth2", "scopes": []any{mcpScopeRead}}}
+		wantSecurity := []any{map[string]any{"type": "oauth2", "scopes": []any{policy.scope}}}
 		if !reflect.DeepEqual(tool["securitySchemes"], wantSecurity) {
-			t.Fatalf("%s securitySchemes = %#v", tool["name"], tool["securitySchemes"])
+			t.Fatalf("%s securitySchemes = %#v", name, tool["securitySchemes"])
 		}
 		if meta, ok := tool["_meta"].(map[string]any); ok {
 			if _, nested := meta["securitySchemes"]; nested {
@@ -174,10 +195,90 @@ func TestMCPDiscoveryAndToolListContract(t *testing.T) {
 			}
 		}
 	}
-	sort.Strings(names)
-	sort.Strings(wantNames)
-	if !reflect.DeepEqual(names, wantNames) {
-		t.Fatalf("tool names=%v want=%v", names, wantNames)
+	if len(seen) != len(wantPolicies) {
+		t.Fatalf("tool names=%v", seen)
+	}
+}
+
+func TestMCPMutationSchemasAreExactAndShared(t *testing.T) {
+	mux := registerMCPTestRoutes(t, newMCPTestService(t, newMemoryRepository(), newMemoryAssetStore(), defaultMCPVerifier))
+	tools := mcpToolsByName(t, mux)
+
+	for _, name := range []string{"add_comment", "edit_comment"} {
+		properties := tools[name]["inputSchema"].(map[string]any)["properties"].(map[string]any)
+		for _, forbidden := range []string{"author", "email", "subject", "user"} {
+			if _, exists := properties[forbidden]; exists {
+				t.Fatalf("%s input exposes trusted actor field %q: %#v", name, forbidden, properties)
+			}
+		}
+	}
+	assertJSONKeys(t, tools["add_comment"]["inputSchema"].(map[string]any)["properties"].(map[string]any), "body", "id")
+	assertJSONKeys(t, tools["edit_comment"]["inputSchema"].(map[string]any)["properties"].(map[string]any), "body", "comment_id", "id")
+
+	parentSchema := tools["set_issue_parent"]["inputSchema"].(map[string]any)
+	if !reflect.DeepEqual(parentSchema["required"], []any{"id", "parent_id"}) || parentSchema["additionalProperties"] != false {
+		t.Fatalf("set_issue_parent input schema = %#v", parentSchema)
+	}
+	parentAnyOf := parentSchema["properties"].(map[string]any)["parent_id"].(map[string]any)["anyOf"].([]any)
+	if !reflect.DeepEqual(parentAnyOf, []any{map[string]any{"type": "string"}, map[string]any{"type": "null"}}) {
+		t.Fatalf("parent_id schema = %#v", parentAnyOf)
+	}
+
+	issueSchema := tools["get_issue"]["outputSchema"]
+	for _, name := range []string{"create_issue", "update_issue", "set_issue_parent", "close_issue", "reopen_issue"} {
+		if !reflect.DeepEqual(tools[name]["outputSchema"], issueSchema) {
+			t.Fatalf("%s issue output schema diverged", name)
+		}
+	}
+	if !reflect.DeepEqual(tools["add_comment"]["outputSchema"], tools["edit_comment"]["outputSchema"]) {
+		t.Fatal("comment output schemas diverged")
+	}
+	commentSchema := tools["add_comment"]["outputSchema"].(map[string]any)
+	if commentSchema["additionalProperties"] != false || !reflect.DeepEqual(commentSchema["required"], []any{"comment"}) {
+		t.Fatalf("comment output schema = %#v", commentSchema)
+	}
+	comment := commentSchema["properties"].(map[string]any)["comment"].(map[string]any)
+	assertJSONKeys(t, comment["properties"].(map[string]any), "author", "body", "created", "id", "updated")
+	if comment["additionalProperties"] != false || !reflect.DeepEqual(comment["required"], []any{"id", "author", "created", "updated", "body"}) {
+		t.Fatalf("comment schema = %#v", comment)
+	}
+}
+
+func TestMCPMutationToolsRequireWriteScopeBeforeDomainInvocation(t *testing.T) {
+	inputs := map[string]map[string]any{
+		"create_project":   {"key": "WRITE"},
+		"create_issue":     {"project": "WRITE", "title": "Title", "description": "Markdown"},
+		"update_issue":     {"id": "WRITE-1", "title": "Title"},
+		"set_issue_parent": {"id": "WRITE-1", "parent_id": nil},
+		"close_issue":      {"id": "WRITE-1"},
+		"reopen_issue":     {"id": "WRITE-1"},
+		"add_comment":      {"id": "WRITE-1", "body": "Body"},
+		"edit_comment":     {"id": "WRITE-1", "comment_id": "aaaaaaaaaaaaaaaaaaaaaaaaaa", "body": "Body"},
+	}
+	for name, input := range inputs {
+		t.Run(name, func(t *testing.T) {
+			repo := &transactionCountingRepository{memoryRepository: newMemoryRepository()}
+			mux := registerMCPTestRoutes(t, newMCPTestService(t, repo, newMemoryAssetStore(), defaultMCPVerifier))
+			response := doMCPRequest(t, mux, "tools/call", name, input, "read")
+			result := mcpResult(t, response)
+			if result["isError"] != true || !strings.Contains(response.Body.String(), "Authorization requires the tissues:write scope.") {
+				t.Fatalf("write-scope denial = %#v body=%q", result, response.Body.String())
+			}
+			challenge := result["_meta"].(map[string]any)["mcp/www_authenticate"].([]any)[0].(string)
+			if !strings.Contains(challenge, `resource_metadata="`+testMCPMetadata+`"`) || !strings.Contains(challenge, `scope="tissues:write"`) || !strings.Contains(challenge, `error="insufficient_scope"`) {
+				t.Fatalf("write-scope challenge = %q", challenge)
+			}
+			if repo.transactions != 0 {
+				t.Fatalf("%s invoked domain with read token", name)
+			}
+		})
+	}
+
+	repo := &transactionCountingRepository{memoryRepository: newMemoryRepository()}
+	mux := registerMCPTestRoutes(t, newMCPTestService(t, repo, newMemoryAssetStore(), defaultMCPVerifier))
+	created := mcpStructured(t, doMCPRequest(t, mux, "tools/call", "create_project", map[string]any{"key": "WRITE"}, "write"))
+	if created["project"].(map[string]any)["key"] != "WRITE" || repo.transactions == 0 {
+		t.Fatalf("write token did not invoke mutation: %#v transactions=%d", created, repo.transactions)
 	}
 }
 
@@ -305,6 +406,205 @@ func TestMCPTimeFormattingIsRFC3339Nano(t *testing.T) {
 	value := time.Date(2026, time.August, 29, 12, 34, 56, 123456789, time.FixedZone("test", 2*60*60))
 	if got, want := formatMCPTime(value), value.Format(time.RFC3339Nano); got != want {
 		t.Fatalf("formatMCPTime() = %q, want %q", got, want)
+	}
+}
+
+func TestMCPProjectAndIssueMutationsMapDomainAndPreserveIdempotency(t *testing.T) {
+	repo := newMemoryRepository()
+	svc := newMCPTestService(t, repo, newMemoryAssetStore(), defaultMCPVerifier)
+	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	svc.now = func() time.Time { return now }
+	mux := registerMCPTestRoutes(t, svc)
+
+	projectResponse := doMCPRequest(t, mux, "tools/call", "create_project", map[string]any{"key": "fluent"}, "write")
+	project := mcpStructured(t, projectResponse)["project"].(map[string]any)
+	assertJSONKeys(t, project, "created", "key")
+	if project["key"] != "FLUENT" {
+		t.Fatalf("create_project = %#v", project)
+	}
+	duplicate := doMCPRequest(t, mux, "tools/call", "create_project", map[string]any{"key": "FLUENT"}, "write")
+	if result := mcpResult(t, duplicate); result["isError"] != true || !strings.Contains(duplicate.Body.String(), "request conflicts with current state") {
+		t.Fatalf("duplicate project result=%#v body=%q", result, duplicate.Body.String())
+	}
+
+	parentResponse := doMCPRequest(t, mux, "tools/call", "create_issue", map[string]any{"project": "FLUENT", "title": "Parent", "description": "Parent **Markdown**"}, "write")
+	parentOutput := mcpStructured(t, parentResponse)["issue"].(map[string]any)
+	if parentOutput["id"] != "FLUENT-1" || parentOutput["state"] != "open" || parentOutput["description"] != "Parent **Markdown**" {
+		t.Fatalf("create_issue parent = %#v", parentOutput)
+	}
+	targetResponse := doMCPRequest(t, mux, "tools/call", "create_issue", map[string]any{"project": "FLUENT", "title": "Target", "description": "Target **Markdown**"}, "write")
+	targetOutput := mcpStructured(t, targetResponse)["issue"].(map[string]any)
+	if targetOutput["id"] != "FLUENT-2" || targetOutput["state"] != "open" {
+		t.Fatalf("create_issue target = %#v", targetOutput)
+	}
+	parentDomain, err := svc.GetIssue(context.Background(), "FLUENT-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetDomain, err := svc.GetIssue(context.Background(), "FLUENT-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(time.Hour)
+	titleResponse := doMCPRequest(t, mux, "tools/call", "update_issue", map[string]any{"id": "FLUENT-2", "title": "Title only"}, "write")
+	titleUpdate := mcpStructured(t, titleResponse)["issue"].(map[string]any)
+	if titleUpdate["title"] != "Title only" || titleUpdate["description"] != "Target **Markdown**" {
+		t.Fatalf("title-only update = %#v", titleUpdate)
+	}
+	now = now.Add(time.Hour)
+	descriptionResponse := doMCPRequest(t, mux, "tools/call", "update_issue", map[string]any{"id": "FLUENT-2", "description": "Description only"}, "write")
+	descriptionUpdate := mcpStructured(t, descriptionResponse)["issue"].(map[string]any)
+	if descriptionUpdate["title"] != "Title only" || descriptionUpdate["description"] != "Description only" {
+		t.Fatalf("description-only update = %#v", descriptionUpdate)
+	}
+	now = now.Add(time.Hour)
+	bothArgs := map[string]any{"id": "FLUENT-2", "title": "Both", "description": "Both **Markdown**"}
+	bothResponse := doMCPRequest(t, mux, "tools/call", "update_issue", bothArgs, "write")
+	bothUpdate := mcpStructured(t, bothResponse)["issue"].(map[string]any)
+	if bothUpdate["title"] != "Both" || bothUpdate["description"] != "Both **Markdown**" {
+		t.Fatalf("combined update = %#v", bothUpdate)
+	}
+	updated := bothUpdate["updated"]
+	now = now.Add(time.Hour)
+	repeatedUpdateResponse := doMCPRequest(t, mux, "tools/call", "update_issue", bothArgs, "write")
+	if repeated := mcpStructured(t, repeatedUpdateResponse)["issue"].(map[string]any); repeated["updated"] != updated {
+		t.Fatalf("identical update advanced timestamp: before=%v after=%v", updated, repeated["updated"])
+	}
+	emptyTitle := doMCPRequest(t, mux, "tools/call", "update_issue", map[string]any{"id": "FLUENT-2", "title": ""}, "write")
+	if result := mcpResult(t, emptyTitle); result["isError"] != true || !strings.Contains(emptyTitle.Body.String(), "invalid request") {
+		t.Fatalf("present empty title result=%#v body=%q", result, emptyTitle.Body.String())
+	}
+	emptyUpdate := doMCPRequest(t, mux, "tools/call", "update_issue", map[string]any{"id": "FLUENT-2"}, "write")
+	if result := mcpResult(t, emptyUpdate); result["isError"] != true || !strings.Contains(emptyUpdate.Body.String(), "invalid request") {
+		t.Fatalf("empty update result=%#v body=%q", result, emptyUpdate.Body.String())
+	}
+
+	now = now.Add(time.Hour)
+	parentArgs := map[string]any{"id": "FLUENT-2", "parent_id": "FLUENT-1"}
+	setParentResponse := doMCPRequest(t, mux, "tools/call", "set_issue_parent", parentArgs, "write")
+	parented := mcpStructured(t, setParentResponse)["issue"].(map[string]any)
+	if parented["parent_id"] != "FLUENT-1" {
+		t.Fatalf("set parent = %#v", parented)
+	}
+	parentUpdated := parented["updated"]
+	now = now.Add(time.Hour)
+	repeatedParentResponse := doMCPRequest(t, mux, "tools/call", "set_issue_parent", parentArgs, "write")
+	if repeated := mcpStructured(t, repeatedParentResponse)["issue"].(map[string]any); repeated["updated"] != parentUpdated {
+		t.Fatalf("identical parent advanced timestamp: before=%v after=%v", parentUpdated, repeated["updated"])
+	}
+	cycle := doMCPRequest(t, mux, "tools/call", "set_issue_parent", map[string]any{"id": "FLUENT-1", "parent_id": "FLUENT-2"}, "write")
+	if result := mcpResult(t, cycle); result["isError"] != true || !strings.Contains(cycle.Body.String(), "invalid request") {
+		t.Fatalf("cycle result=%#v body=%q", result, cycle.Body.String())
+	}
+	missingParent := doMCPRequest(t, mux, "tools/call", "set_issue_parent", map[string]any{"id": "FLUENT-2"}, "write")
+	if result := mcpResult(t, missingParent); result["isError"] != true {
+		t.Fatalf("missing parent_id accepted: %#v", result)
+	}
+	now = now.Add(time.Hour)
+	detachResponse := doMCPRequest(t, mux, "tools/call", "set_issue_parent", map[string]any{"id": "FLUENT-2", "parent_id": nil}, "write")
+	if detached := mcpStructured(t, detachResponse)["issue"].(map[string]any); detached["parent_id"] != "" {
+		t.Fatalf("detach = %#v", detached)
+	}
+
+	now = now.Add(time.Hour)
+	closeResponse := doMCPRequest(t, mux, "tools/call", "close_issue", map[string]any{"id": "FLUENT-2"}, "write")
+	closed := mcpStructured(t, closeResponse)["issue"].(map[string]any)
+	if closed["state"] != "closed" {
+		t.Fatalf("close = %#v", closed)
+	}
+	closedUpdated := closed["updated"]
+	now = now.Add(time.Hour)
+	repeatedCloseResponse := doMCPRequest(t, mux, "tools/call", "close_issue", map[string]any{"id": "FLUENT-2"}, "write")
+	if repeated := mcpStructured(t, repeatedCloseResponse)["issue"].(map[string]any); repeated["state"] != "closed" || repeated["updated"] != closedUpdated {
+		t.Fatalf("repeated close = %#v", repeated)
+	}
+
+	now = now.Add(time.Hour)
+	reopenResponse := doMCPRequest(t, mux, "tools/call", "reopen_issue", map[string]any{"id": "FLUENT-2"}, "write")
+	reopened := mcpStructured(t, reopenResponse)["issue"].(map[string]any)
+	if reopened["state"] != "open" {
+		t.Fatalf("reopen = %#v", reopened)
+	}
+	reopenedUpdated := reopened["updated"]
+	now = now.Add(time.Hour)
+	repeatedReopenResponse := doMCPRequest(t, mux, "tools/call", "reopen_issue", map[string]any{"id": "FLUENT-2"}, "write")
+	if repeated := mcpStructured(t, repeatedReopenResponse)["issue"].(map[string]any); repeated["state"] != "open" || repeated["updated"] != reopenedUpdated {
+		t.Fatalf("repeated reopen = %#v", repeated)
+	}
+
+	for _, response := range []*httptest.ResponseRecorder{parentResponse, targetResponse, titleResponse, descriptionResponse, bothResponse, repeatedUpdateResponse, setParentResponse, repeatedParentResponse, detachResponse, closeResponse, repeatedCloseResponse, reopenResponse, repeatedReopenResponse} {
+		for _, opaqueID := range []string{parentDomain.ID, targetDomain.ID} {
+			if strings.Contains(response.Body.String(), opaqueID) {
+				t.Fatalf("mutation leaked opaque Issue ID %q: %s", opaqueID, response.Body.String())
+			}
+		}
+	}
+}
+
+func TestMCPCommentMutationsUseTrustedActorAndPreserveAuthor(t *testing.T) {
+	repo := newMemoryRepository()
+	svc := newMCPTestService(t, repo, newMemoryAssetStore(), defaultMCPVerifier)
+	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	svc.now = func() time.Time { return now }
+	if _, err := svc.CreateProject(context.Background(), "COMMENTS"); err != nil {
+		t.Fatal(err)
+	}
+	issue, err := svc.CreateIssue(context.Background(), "COMMENTS", CreateIssueRequest{Title: "Comments", Description: "Markdown"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := registerMCPTestRoutes(t, svc)
+	args := map[string]any{"id": issue.Ref, "body": "Comment **Markdown**"}
+
+	firstResponse := doMCPRequest(t, mux, "tools/call", "add_comment", args, "write")
+	first := mcpStructured(t, firstResponse)["comment"].(map[string]any)
+	assertJSONKeys(t, first, "author", "body", "created", "id", "updated")
+	if first["author"] != "person@example.test" || first["body"] != "Comment **Markdown**" {
+		t.Fatalf("email-attributed comment = %#v", first)
+	}
+	second := mcpStructured(t, doMCPRequest(t, mux, "tools/call", "add_comment", args, "write"))["comment"].(map[string]any)
+	if second["id"] == first["id"] {
+		t.Fatalf("identical add_comment was idempotent: first=%#v second=%#v", first, second)
+	}
+	fallback := mcpStructured(t, doMCPRequest(t, mux, "tools/call", "add_comment", map[string]any{"id": issue.Ref, "body": "Subject"}, "subject-only"))["comment"].(map[string]any)
+	if fallback["author"] != "subject-fallback" {
+		t.Fatalf("subject fallback comment = %#v", fallback)
+	}
+
+	beforeRejected, err := svc.GetIssue(context.Background(), issue.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected := doMCPRequest(t, mux, "tools/call", "add_comment", map[string]any{"id": issue.Ref, "body": "Forged", "author": "attacker@example.test"}, "write")
+	if result := mcpResult(t, rejected); result["isError"] != true {
+		t.Fatalf("forged author accepted: %#v", result)
+	}
+	afterRejected, err := svc.GetIssue(context.Background(), issue.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterRejected.Comments) != len(beforeRejected.Comments) {
+		t.Fatal("schema-rejected author input invoked AddComment")
+	}
+
+	now = now.Add(time.Hour)
+	editArgs := map[string]any{"id": issue.Ref, "comment_id": first["id"], "body": "Replacement **Markdown**"}
+	editedResponse := doMCPRequest(t, mux, "tools/call", "edit_comment", editArgs, "other-write")
+	edited := mcpStructured(t, editedResponse)["comment"].(map[string]any)
+	if edited["author"] != first["author"] || edited["body"] != "Replacement **Markdown**" {
+		t.Fatalf("shared-workspace edit = %#v", edited)
+	}
+	editedUpdated := edited["updated"]
+	now = now.Add(time.Hour)
+	repeated := mcpStructured(t, doMCPRequest(t, mux, "tools/call", "edit_comment", editArgs, "other-write"))["comment"].(map[string]any)
+	if repeated["author"] != first["author"] || repeated["updated"] != editedUpdated {
+		t.Fatalf("identical edit changed author/timestamp: %#v", repeated)
+	}
+
+	missingActor := doMCPRequest(t, mux, "tools/call", "add_comment", args, "write-no-actor")
+	if result := mcpResult(t, missingActor); result["isError"] != true || !strings.Contains(missingActor.Body.String(), "internal server error") {
+		t.Fatalf("missing actor failure result=%#v body=%q", result, missingActor.Body.String())
 	}
 }
 
@@ -569,6 +869,12 @@ func defaultMCPVerifier(_ context.Context, token string) (MCPVerifiedToken, erro
 		return MCPVerifiedToken{Subject: "subject-1", Email: "person@example.test", ClientID: "client-1", Scopes: []string{mcpScopeRead}, ExpiresAt: time.Now().Add(time.Hour)}, nil
 	case "write":
 		return MCPVerifiedToken{Subject: "subject-1", Email: "person@example.test", ClientID: "client-1", Scopes: []string{mcpScopeRead, mcpScopeWrite}, ExpiresAt: time.Now().Add(time.Hour)}, nil
+	case "subject-only":
+		return MCPVerifiedToken{Subject: "subject-fallback", ClientID: "client-1", Scopes: []string{mcpScopeRead, mcpScopeWrite}, ExpiresAt: time.Now().Add(time.Hour)}, nil
+	case "other-write":
+		return MCPVerifiedToken{Subject: "subject-2", Email: "other@example.test", ClientID: "client-2", Scopes: []string{mcpScopeRead, mcpScopeWrite}, ExpiresAt: time.Now().Add(time.Hour)}, nil
+	case "write-no-actor":
+		return MCPVerifiedToken{ClientID: "client-1", Scopes: []string{mcpScopeRead, mcpScopeWrite}, ExpiresAt: time.Now().Add(time.Hour)}, nil
 	case "none":
 		return MCPVerifiedToken{Subject: "subject-1", Scopes: nil, ExpiresAt: time.Now().Add(time.Hour)}, nil
 	case "expired":
@@ -688,11 +994,32 @@ func mcpStructured(t *testing.T, response *httptest.ResponseRecorder) map[string
 	return structured
 }
 
+func mcpToolsByName(t *testing.T, handler http.Handler) map[string]map[string]any {
+	t.Helper()
+	tools := mcpResult(t, doMCPRequest(t, handler, "tools/list", "", nil, "read"))["tools"].([]any)
+	byName := make(map[string]map[string]any, len(tools))
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		byName[tool["name"].(string)] = tool
+	}
+	return byName
+}
+
 type actorRepository struct {
 	*memoryRepository
 	called  bool
 	subject string
 	email   string
+}
+
+type transactionCountingRepository struct {
+	*memoryRepository
+	transactions int
+}
+
+func (r *transactionCountingRepository) RunInTransaction(ctx context.Context, fn func(Transaction) error) error {
+	r.transactions++
+	return r.memoryRepository.RunInTransaction(ctx, fn)
 }
 
 func (r *actorRepository) GetProject(ctx context.Context, key string) (*Project, error) {
@@ -736,11 +1063,22 @@ func TestMCPToolCatalogNamesAreUnique(t *testing.T) {
 	names := make([]string, 0, len(mcpToolCatalog))
 	for _, spec := range mcpToolCatalog {
 		names = append(names, spec.Name)
-		if spec.Scope != mcpScopeRead {
-			t.Fatalf("%s scope=%q", spec.Name, spec.Scope)
+		if spec.OpenWorld {
+			t.Fatalf("%s unexpectedly open-world", spec.Name)
+		}
+		if spec.ReadOnly {
+			if spec.Scope != mcpScopeRead || spec.Destructive || !spec.Idempotent {
+				t.Fatalf("read policy for %s = %#v", spec.Name, spec)
+			}
+		} else if spec.Scope != mcpScopeWrite {
+			t.Fatalf("write policy for %s = %#v", spec.Name, spec)
 		}
 	}
 	sort.Strings(names)
+	want := []string{"add_comment", "close_issue", "create_issue", "create_project", "edit_comment", "get_issue", "get_project", "list_issue_images", "list_issues", "list_projects", "reopen_issue", "set_issue_parent", "update_issue"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("tool names=%v want=%v", names, want)
+	}
 	for i := 1; i < len(names); i++ {
 		if names[i] == names[i-1] {
 			t.Fatalf("duplicate MCP tool %q", names[i])

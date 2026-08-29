@@ -61,14 +61,26 @@ type mcpToolSpec struct {
 	Title       string
 	Description string
 	Scope       string
+	ReadOnly    bool
+	Destructive bool
+	Idempotent  bool
+	OpenWorld   bool
 }
 
 var mcpToolCatalog = []mcpToolSpec{
-	{Name: "list_projects", Title: "List projects", Description: "List Tissues projects. Returns project keys, creation times, and an opaque continuation cursor.", Scope: mcpScopeRead},
-	{Name: "get_project", Title: "Get project", Description: "Get one Tissues project by key. Returns its canonical key and creation time.", Scope: mcpScopeRead},
-	{Name: "list_issues", Title: "List issues", Description: "List Tissues issue summaries, optionally filtered by project. Returns canonical issue and parent references plus an opaque continuation cursor.", Scope: mcpScopeRead},
-	{Name: "get_issue", Title: "Get issue", Description: "Get one Tissues issue by canonical PROJECT-NUMBER reference, including its description, children, and comments.", Scope: mcpScopeRead},
-	{Name: "list_issue_images", Title: "List issue images", Description: "List image attachments for one canonical PROJECT-NUMBER issue reference. Returns canonical filenames, dimensions, media types, and byte sizes.", Scope: mcpScopeRead},
+	{Name: "list_projects", Title: "List projects", Description: "List Tissues projects. Returns project keys, creation times, and an opaque continuation cursor.", Scope: mcpScopeRead, ReadOnly: true, Idempotent: true},
+	{Name: "get_project", Title: "Get project", Description: "Get one Tissues project by key. Returns its canonical key and creation time.", Scope: mcpScopeRead, ReadOnly: true, Idempotent: true},
+	{Name: "list_issues", Title: "List issues", Description: "List Tissues issue summaries, optionally filtered by project. Returns canonical issue and parent references plus an opaque continuation cursor.", Scope: mcpScopeRead, ReadOnly: true, Idempotent: true},
+	{Name: "get_issue", Title: "Get issue", Description: "Get one Tissues issue by canonical PROJECT-NUMBER reference, including its description, children, and comments.", Scope: mcpScopeRead, ReadOnly: true, Idempotent: true},
+	{Name: "list_issue_images", Title: "List issue images", Description: "List image attachments for one canonical PROJECT-NUMBER issue reference. Returns canonical filenames, dimensions, media types, and byte sizes.", Scope: mcpScopeRead, ReadOnly: true, Idempotent: true},
+	{Name: "create_project", Title: "Create project", Description: "Create a Tissues project from a project key.", Scope: mcpScopeWrite},
+	{Name: "create_issue", Title: "Create issue", Description: "Create a Tissues issue with a title and Markdown description.", Scope: mcpScopeWrite},
+	{Name: "update_issue", Title: "Update issue", Description: "Replace the title, Markdown description, or both for a Tissues issue.", Scope: mcpScopeWrite, Destructive: true, Idempotent: true},
+	{Name: "set_issue_parent", Title: "Set issue parent", Description: "Set or detach the parent of a Tissues issue.", Scope: mcpScopeWrite, Destructive: true, Idempotent: true},
+	{Name: "close_issue", Title: "Close issue", Description: "Set a Tissues issue state to closed.", Scope: mcpScopeWrite, Destructive: true, Idempotent: true},
+	{Name: "reopen_issue", Title: "Reopen issue", Description: "Set a Tissues issue state to open.", Scope: mcpScopeWrite, Destructive: true, Idempotent: true},
+	{Name: "add_comment", Title: "Add comment", Description: "Add a Markdown comment attributed to the authenticated actor.", Scope: mcpScopeWrite},
+	{Name: "edit_comment", Title: "Edit comment", Description: "Replace the Markdown body of a Tissues comment.", Scope: mcpScopeWrite, Destructive: true, Idempotent: true},
 }
 
 type listProjectsInput struct {
@@ -100,11 +112,51 @@ type getIssueInput struct {
 type getIssueOutput struct {
 	Issue mcpIssueDTO `json:"issue"`
 }
+
+func emptyIssueOutput() getIssueOutput {
+	return getIssueOutput{Issue: mcpIssueDTO{Children: []mcpIssueDTO{}, Comments: []mcpCommentDTO{}}}
+}
+
 type listIssueImagesInput struct {
 	ID string `json:"id" jsonschema:"canonical issue reference in PROJECT-NUMBER form"`
 }
 type listIssueImagesOutput struct {
 	Images []mcpImageDTO `json:"images"`
+}
+type createProjectInput struct {
+	Key string `json:"key" jsonschema:"project key, such as FLUENT"`
+}
+type createProjectOutput struct {
+	Project mcpProjectDTO `json:"project"`
+}
+type createIssueInput struct {
+	Project     string `json:"project" jsonschema:"project key, such as FLUENT"`
+	Title       string `json:"title" jsonschema:"issue title"`
+	Description string `json:"description" jsonschema:"canonical Markdown description"`
+}
+type updateIssueInput struct {
+	ID          string  `json:"id" jsonschema:"canonical issue reference in PROJECT-NUMBER form"`
+	Title       *string `json:"title,omitempty" jsonschema:"optional replacement title"`
+	Description *string `json:"description,omitempty" jsonschema:"optional replacement Markdown description"`
+}
+type setIssueParentInput struct {
+	ID       string  `json:"id"`
+	ParentID *string `json:"parent_id"`
+}
+type issueIDInput struct {
+	ID string `json:"id" jsonschema:"canonical issue reference in PROJECT-NUMBER form"`
+}
+type addCommentInput struct {
+	ID   string `json:"id" jsonschema:"canonical issue reference in PROJECT-NUMBER form"`
+	Body string `json:"body" jsonschema:"canonical Markdown comment body"`
+}
+type editCommentInput struct {
+	ID        string `json:"id" jsonschema:"canonical issue reference in PROJECT-NUMBER form"`
+	CommentID string `json:"comment_id" jsonschema:"public comment ID"`
+	Body      string `json:"body" jsonschema:"replacement canonical Markdown comment body"`
+}
+type mcpCommentOutput struct {
+	Comment mcpCommentDTO `json:"comment"`
 }
 type mcpProjectDTO struct {
 	Key     string `json:"key"`
@@ -248,20 +300,29 @@ func validateMCPAuth(config MCPAuth) (issuer, resource, metadataURL string, err 
 	return config.Issuer, config.Resource, metadata.String(), nil
 }
 
-func readToolAnnotations() *mcp.ToolAnnotations {
-	openWorld := false
-	return &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: &openWorld}
+func toolAnnotations(spec mcpToolSpec) *mcp.ToolAnnotations {
+	openWorld := spec.OpenWorld
+	annotations := &mcp.ToolAnnotations{ReadOnlyHint: spec.ReadOnly, IdempotentHint: spec.Idempotent, OpenWorldHint: &openWorld}
+	if !spec.ReadOnly {
+		destructive := spec.Destructive
+		annotations.DestructiveHint = &destructive
+	}
+	return annotations
 }
 
 func toolDefinition(spec mcpToolSpec) *mcp.Tool {
-	tool := &mcp.Tool{Name: spec.Name, Title: spec.Title, Description: spec.Description, Annotations: readToolAnnotations()}
-	if spec.Name == "get_issue" {
-		tool.OutputSchema = getIssueOutputSchema()
+	tool := &mcp.Tool{Name: spec.Name, Title: spec.Title, Description: spec.Description, Annotations: toolAnnotations(spec)}
+	if spec.Name == "set_issue_parent" {
+		tool.InputSchema = setIssueParentInputSchema()
+	}
+	switch spec.Name {
+	case "get_issue", "create_issue", "update_issue", "set_issue_parent", "close_issue", "reopen_issue":
+		tool.OutputSchema = mcpIssueOutputSchema()
 	}
 	return tool
 }
 
-func getIssueOutputSchema() map[string]any {
+func mcpIssueOutputSchema() map[string]any {
 	comment := map[string]any{
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
@@ -291,6 +352,20 @@ func getIssueOutputSchema() map[string]any {
 	}
 }
 
+func setIssueParentInputSchema() map[string]any {
+	return map[string]any{
+		"type": "object", "additionalProperties": false,
+		"properties": map[string]any{
+			"id": map[string]any{"type": "string"},
+			"parent_id": map[string]any{"anyOf": []any{
+				map[string]any{"type": "string"},
+				map[string]any{"type": "null"},
+			}},
+		},
+		"required": []string{"id", "parent_id"},
+	}
+}
+
 func (s *Service) registerMCPTools(server *mcp.Server, metadataURL string) {
 	for _, spec := range mcpToolCatalog {
 		switch spec.Name {
@@ -304,6 +379,22 @@ func (s *Service) registerMCPTools(server *mcp.Server, metadataURL string) {
 			mcp.AddTool(server, toolDefinition(spec), s.getIssueMCP(metadataURL, spec))
 		case "list_issue_images":
 			mcp.AddTool(server, toolDefinition(spec), s.listIssueImagesMCP(metadataURL, spec))
+		case "create_project":
+			mcp.AddTool(server, toolDefinition(spec), s.createProjectMCP(metadataURL, spec))
+		case "create_issue":
+			mcp.AddTool(server, toolDefinition(spec), s.createIssueMCP(metadataURL, spec))
+		case "update_issue":
+			mcp.AddTool(server, toolDefinition(spec), s.updateIssueMCP(metadataURL, spec))
+		case "set_issue_parent":
+			mcp.AddTool(server, toolDefinition(spec), s.setIssueParentMCP(metadataURL, spec))
+		case "close_issue":
+			mcp.AddTool(server, toolDefinition(spec), s.closeIssueMCP(metadataURL, spec))
+		case "reopen_issue":
+			mcp.AddTool(server, toolDefinition(spec), s.reopenIssueMCP(metadataURL, spec))
+		case "add_comment":
+			mcp.AddTool(server, toolDefinition(spec), s.addCommentMCP(metadataURL, spec))
+		case "edit_comment":
+			mcp.AddTool(server, toolDefinition(spec), s.editCommentMCP(metadataURL, spec))
 		default:
 			panic("unregistered MCP tool " + spec.Name)
 		}
@@ -364,7 +455,7 @@ func (s *Service) getIssueMCP(metadataURL string, spec mcpToolSpec) mcp.ToolHand
 	return func(ctx context.Context, req *mcp.CallToolRequest, input getIssueInput) (*mcp.CallToolResult, getIssueOutput, error) {
 		ctx, denied := authorizeMCPTool(ctx, req, spec, metadataURL)
 		if denied != nil {
-			return denied, getIssueOutput{}, nil
+			return denied, emptyIssueOutput(), nil
 		}
 		issue, err := s.GetIssue(ctx, input.ID)
 		if err != nil {
@@ -396,6 +487,129 @@ func (s *Service) listIssueImagesMCP(metadataURL string, spec mcpToolSpec) mcp.T
 	}
 }
 
+func (s *Service) createProjectMCP(metadataURL string, spec mcpToolSpec) mcp.ToolHandlerFor[createProjectInput, createProjectOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input createProjectInput) (*mcp.CallToolResult, createProjectOutput, error) {
+		ctx, denied := authorizeMCPTool(ctx, req, spec, metadataURL)
+		if denied != nil {
+			return denied, createProjectOutput{}, nil
+		}
+		project, err := s.CreateProject(ctx, input.Key)
+		if err != nil {
+			return nil, createProjectOutput{}, safeMCPToolError(ctx, spec.Name, err)
+		}
+		return nil, createProjectOutput{Project: toMCPProjectDTO(project)}, nil
+	}
+}
+
+func (s *Service) createIssueMCP(metadataURL string, spec mcpToolSpec) mcp.ToolHandlerFor[createIssueInput, getIssueOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input createIssueInput) (*mcp.CallToolResult, getIssueOutput, error) {
+		ctx, denied := authorizeMCPTool(ctx, req, spec, metadataURL)
+		if denied != nil {
+			return denied, emptyIssueOutput(), nil
+		}
+		issue, err := s.CreateIssue(ctx, input.Project, CreateIssueRequest{Title: input.Title, Description: input.Description})
+		if err != nil {
+			return nil, getIssueOutput{}, safeMCPToolError(ctx, spec.Name, err)
+		}
+		return nil, getIssueOutput{Issue: toMCPIssueDTO(issue)}, nil
+	}
+}
+
+func (s *Service) updateIssueMCP(metadataURL string, spec mcpToolSpec) mcp.ToolHandlerFor[updateIssueInput, getIssueOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input updateIssueInput) (*mcp.CallToolResult, getIssueOutput, error) {
+		ctx, denied := authorizeMCPTool(ctx, req, spec, metadataURL)
+		if denied != nil {
+			return denied, emptyIssueOutput(), nil
+		}
+		if input.Title == nil && input.Description == nil {
+			return nil, getIssueOutput{}, safeMCPToolError(ctx, spec.Name, fmt.Errorf("%w: title or description is required", ErrInvalid))
+		}
+		issue, err := s.UpdateIssue(ctx, UpdateIssueRequest{Ref: input.ID, Title: input.Title, Description: input.Description})
+		if err != nil {
+			return nil, getIssueOutput{}, safeMCPToolError(ctx, spec.Name, err)
+		}
+		return nil, getIssueOutput{Issue: toMCPIssueDTO(issue)}, nil
+	}
+}
+
+func (s *Service) setIssueParentMCP(metadataURL string, spec mcpToolSpec) mcp.ToolHandlerFor[setIssueParentInput, getIssueOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input setIssueParentInput) (*mcp.CallToolResult, getIssueOutput, error) {
+		ctx, denied := authorizeMCPTool(ctx, req, spec, metadataURL)
+		if denied != nil {
+			return denied, emptyIssueOutput(), nil
+		}
+		parent := ""
+		if input.ParentID != nil {
+			parent = *input.ParentID
+		}
+		issue, err := s.MoveIssue(ctx, input.ID, parent)
+		if err != nil {
+			return nil, getIssueOutput{}, safeMCPToolError(ctx, spec.Name, err)
+		}
+		return nil, getIssueOutput{Issue: toMCPIssueDTO(issue)}, nil
+	}
+}
+
+func (s *Service) closeIssueMCP(metadataURL string, spec mcpToolSpec) mcp.ToolHandlerFor[issueIDInput, getIssueOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input issueIDInput) (*mcp.CallToolResult, getIssueOutput, error) {
+		ctx, denied := authorizeMCPTool(ctx, req, spec, metadataURL)
+		if denied != nil {
+			return denied, emptyIssueOutput(), nil
+		}
+		issue, err := s.CloseIssue(ctx, input.ID)
+		if err != nil {
+			return nil, getIssueOutput{}, safeMCPToolError(ctx, spec.Name, err)
+		}
+		return nil, getIssueOutput{Issue: toMCPIssueDTO(issue)}, nil
+	}
+}
+
+func (s *Service) reopenIssueMCP(metadataURL string, spec mcpToolSpec) mcp.ToolHandlerFor[issueIDInput, getIssueOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input issueIDInput) (*mcp.CallToolResult, getIssueOutput, error) {
+		ctx, denied := authorizeMCPTool(ctx, req, spec, metadataURL)
+		if denied != nil {
+			return denied, emptyIssueOutput(), nil
+		}
+		issue, err := s.ReopenIssue(ctx, input.ID)
+		if err != nil {
+			return nil, getIssueOutput{}, safeMCPToolError(ctx, spec.Name, err)
+		}
+		return nil, getIssueOutput{Issue: toMCPIssueDTO(issue)}, nil
+	}
+}
+
+func (s *Service) addCommentMCP(metadataURL string, spec mcpToolSpec) mcp.ToolHandlerFor[addCommentInput, mcpCommentOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input addCommentInput) (*mcp.CallToolResult, mcpCommentOutput, error) {
+		ctx, denied := authorizeMCPTool(ctx, req, spec, metadataURL)
+		if denied != nil {
+			return denied, mcpCommentOutput{}, nil
+		}
+		author, err := mcpCommentAuthor(ctx)
+		if err != nil {
+			return nil, mcpCommentOutput{}, safeMCPToolError(ctx, spec.Name, err)
+		}
+		comment, err := s.AddComment(ctx, input.ID, author, input.Body)
+		if err != nil {
+			return nil, mcpCommentOutput{}, safeMCPToolError(ctx, spec.Name, err)
+		}
+		return nil, mcpCommentOutput{Comment: toMCPCommentDTO(comment)}, nil
+	}
+}
+
+func (s *Service) editCommentMCP(metadataURL string, spec mcpToolSpec) mcp.ToolHandlerFor[editCommentInput, mcpCommentOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input editCommentInput) (*mcp.CallToolResult, mcpCommentOutput, error) {
+		ctx, denied := authorizeMCPTool(ctx, req, spec, metadataURL)
+		if denied != nil {
+			return denied, mcpCommentOutput{}, nil
+		}
+		comment, err := s.EditComment(ctx, input.ID, input.CommentID, input.Body)
+		if err != nil {
+			return nil, mcpCommentOutput{}, safeMCPToolError(ctx, spec.Name, err)
+		}
+		return nil, mcpCommentOutput{Comment: toMCPCommentDTO(comment)}, nil
+	}
+}
+
 func mcpPageSize(size int) int {
 	if size == 0 {
 		return DefaultPageSize
@@ -409,7 +623,7 @@ func authorizeMCPTool(ctx context.Context, req *mcp.CallToolRequest, spec mcpToo
 		challenge := fmt.Sprintf(`Bearer resource_metadata=%q, scope=%q, error="insufficient_scope"`, metadataURL, spec.Scope)
 		return ctx, &mcp.CallToolResult{
 			Meta:    mcp.Meta{"mcp/www_authenticate": []string{challenge}},
-			Content: []mcp.Content{&mcp.TextContent{Text: "Authorization requires the tissues:read scope."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Authorization requires the %s scope.", spec.Scope)}},
 			IsError: true,
 		}
 	}
@@ -420,12 +634,24 @@ func authorizeMCPTool(ctx context.Context, req *mcp.CallToolRequest, spec mcpToo
 	return ctx, nil
 }
 
+func mcpCommentAuthor(ctx context.Context) (string, error) {
+	if email, ok := gcpauth.EmailFromContext(ctx); ok {
+		return email, nil
+	}
+	if subject, ok := gcpauth.SubjectFromContext(ctx); ok {
+		return subject, nil
+	}
+	return "", fmt.Errorf("%w: authenticated actor identity is unavailable", ErrInternal)
+}
+
 func safeMCPToolError(ctx context.Context, tool string, err error) error {
 	switch {
 	case errors.Is(err, ErrInvalid):
 		return errors.New("invalid request")
 	case errors.Is(err, ErrNotFound):
 		return errors.New("resource not found")
+	case errors.Is(err, ErrConflict):
+		return errors.New("request conflicts with current state")
 	default:
 		slog.ErrorContext(ctx, "Tissues MCP tool failed", "tool", tool, "error", err)
 		return errors.New("internal server error")
