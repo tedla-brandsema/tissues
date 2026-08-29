@@ -38,6 +38,7 @@ app/gcp/server
     +-- services/tissues
             +-- tissues domain
             +-- tissues Datastore adapter
+            +-- private GCS Issue asset adapter
             +-- same-origin /api/tissues/v1 JSON boundary
             +-- frontend/ React workspace and embedded generated assets
 ```
@@ -90,6 +91,15 @@ browser API as the derived parent issue ID; Issue-ID resolution and hierarchy
 assertions occur in the same transaction as mutation.
 Comments belong to an Issue. Markdown is canonical rich text; trusted client
 HTML is not persisted.
+
+Existing Issues may also own JPEG and PNG assets through the Service-owned
+`AssetStore` boundary. The GCS adapter inventories deterministic
+`issues/{PROJECT}/{NUMBER}/{filename}` objects in separate private production
+and dogfood buckets; no Datastore Asset entity is introduced. Upload input is
+bounded to 6 MiB, decoded and freshly encoded as pixels, and persisted only
+after normalization to a 1200-pixel longest edge and 1 MiB maximum. Original
+bytes and source metadata are discarded. Assets are read through authenticated
+same-origin API routes rather than public or signed GCS URLs.
 
 Opaque Issue entity identities and Comment IDs are 16 random bytes encoded as
 lowercase, unpadded base32 (26 characters, no timestamp semantics). A

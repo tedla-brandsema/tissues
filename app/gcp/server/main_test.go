@@ -34,6 +34,28 @@ func TestConcreteServicesShareSDK(t *testing.T) {
 	}
 }
 
+func TestProductionAssetAndTimeoutEnvironmentLoads(t *testing.T) {
+	profile, err := coreconfig.Load[appConfig](context.Background(), coreconfig.LoadOptions{
+		Prefix: "TISSUES",
+		Environment: coreconfig.MapEnvironment{
+			"TISSUES_SERVER_READ_TIMEOUT":        "60s",
+			"TISSUES_SERVER_WRITE_TIMEOUT":       "60s",
+			"TISSUES_TISSUES_STORAGE_PROJECT_ID": "tissues-dev",
+			"TISSUES_TISSUES_STORAGE_NAMESPACE":  "tissues",
+			"TISSUES_TISSUES_ASSETS_BUCKET":      "tissues-dev-tissues-assets-production",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Config.Server.ReadTimeout != 60*time.Second || profile.Config.Server.WriteTimeout != 60*time.Second {
+		t.Fatalf("timeouts = %s/%s", profile.Config.Server.ReadTimeout, profile.Config.Server.WriteTimeout)
+	}
+	if got := profile.Config.Tissues.Assets.Bucket; got != "tissues-dev-tissues-assets-production" {
+		t.Fatalf("asset bucket = %q", got)
+	}
+}
+
 type routeService struct {
 	name string
 	err  error

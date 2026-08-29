@@ -13,6 +13,7 @@ type Config struct {
 	service.Contribution
 	Enabled bool `cfg:"bool,default=true,restart=true"`
 	Storage StorageConfig
+	Assets  AssetsConfig
 	Auth    AuthConfig
 }
 
@@ -21,6 +22,10 @@ var _ service.Configuration = Config{}
 type StorageConfig struct {
 	ProjectID string `cfg:"string,restart=true"`
 	Namespace string `cfg:"string,default=tissues,restart=true"`
+}
+
+type AssetsConfig struct {
+	Bucket string `cfg:"string,restart=true"`
 }
 
 // AuthConfig controls relying-service enforcement independently of whether
@@ -44,6 +49,9 @@ func (cfg Config) ValidateConfig() error {
 	}
 	if strings.TrimSpace(cfg.Storage.Namespace) == "" {
 		return fmt.Errorf("Storage.Namespace must not be empty")
+	}
+	if strings.TrimSpace(cfg.Assets.Bucket) == "" {
+		return fmt.Errorf("Assets.Bucket is required when Enabled is true")
 	}
 	if !cfg.Auth.Enabled {
 		return nil

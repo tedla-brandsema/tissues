@@ -7,11 +7,11 @@ import (
 )
 
 func TestConfigDefaultsAndValidation(t *testing.T) {
-	profile, err := config.Load[Config](context.Background(), config.LoadOptions{Environment: config.MapEnvironment{"TISSUES_STORAGE_PROJECT_ID": "example"}, Prefix: "TISSUES"})
+	profile, err := config.Load[Config](context.Background(), config.LoadOptions{Environment: config.MapEnvironment{"TISSUES_STORAGE_PROJECT_ID": "example", "TISSUES_ASSETS_BUCKET": "assets"}, Prefix: "TISSUES"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !profile.Config.Enabled || profile.Config.Storage.Namespace != "tissues" {
+	if !profile.Config.Enabled || profile.Config.Storage.Namespace != "tissues" || profile.Config.Assets.Bucket != "assets" {
 		t.Fatalf("config=%#v", profile.Config)
 	}
 }

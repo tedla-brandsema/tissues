@@ -64,7 +64,7 @@ func TestAuthEnabledPreservesExactOriginalRequestURI(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}
-	cfg := Config{Enabled: true, Storage: StorageConfig{ProjectID: "example", Namespace: "test"}, Auth: AuthConfig{Enabled: true, BrokerURL: brokerURL, ClientID: "tissues", ClientSecret: "client-secret", RedirectURI: "http://tissues.example.test/tissues/auth/callback", SessionSecret: "01234567890123456789012345678901", InsecureCookie: true}}
+	cfg := Config{Enabled: true, Storage: StorageConfig{ProjectID: "example", Namespace: "test"}, Assets: AssetsConfig{Bucket: "assets"}, Auth: AuthConfig{Enabled: true, BrokerURL: brokerURL, ClientID: "tissues", ClientSecret: "client-secret", RedirectURI: "http://tissues.example.test/tissues/auth/callback", SessionSecret: "01234567890123456789012345678901", InsecureCookie: true}}
 	profile, err := config.NewServiceProfile("test", cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +73,7 @@ func TestAuthEnabledPreservesExactOriginalRequestURI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := New(slot, newMemoryRepository(), WithHTTPClient(client))
+	svc, err := New(slot, newMemoryRepository(), newMemoryAssetStore(), WithHTTPClient(client))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,6 +115,11 @@ func TestAuthEnabledPreservesExactOriginalRequestURI(t *testing.T) {
 	mux.ServeHTTP(api, httptest.NewRequest(http.MethodGet, apiBasePath+"/projects", nil))
 	if api.Code != http.StatusUnauthorized || !strings.Contains(api.Header().Get("Content-Type"), "application/json") || !strings.Contains(api.Body.String(), `"kind":"unauthorized"`) {
 		t.Fatalf("unauthenticated API=%d %q %q", api.Code, api.Header().Get("Content-Type"), api.Body.String())
+	}
+	assetAPI := httptest.NewRecorder()
+	mux.ServeHTTP(assetAPI, httptest.NewRequest(http.MethodGet, apiBasePath+"/issues/FLUENT-17/assets", nil))
+	if assetAPI.Code != http.StatusUnauthorized || !strings.Contains(assetAPI.Body.String(), `"kind":"unauthorized"`) {
+		t.Fatalf("unauthenticated asset API=%d %q", assetAPI.Code, assetAPI.Body.String())
 	}
 }
 
@@ -161,13 +166,13 @@ func TestAuthenticatedBootstrapPrefersEmail(t *testing.T) {
 func TestServiceProfileReloadDoesNotMutateOuterServerConfig(t *testing.T) {
 	ctx := context.Background()
 	store := config.NewMemoryStore()
-	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"storage":{"project_id":"example","namespace":"one"}}`)})
+	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"storage":{"project_id":"example","namespace":"one"},"assets":{"bucket":"assets"}}`)})
 	manager, err := config.NewManager[Config](ctx, config.LoadOptions{Name: "demo", Prefix: "TISSUES_SERVICE", Store: store})
 	if err != nil {
 		t.Fatal(err)
 	}
 	outerPort := 8080
-	svc, err := New(manager, newMemoryRepository())
+	svc, err := New(manager, newMemoryRepository(), newMemoryAssetStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +180,7 @@ func TestServiceProfileReloadDoesNotMutateOuterServerConfig(t *testing.T) {
 	if err := svc.RegisterRoutes(mux); err != nil {
 		t.Fatal(err)
 	}
-	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"storage":{"project_id":"example","namespace":"two"}}`)})
+	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"storage":{"project_id":"example","namespace":"two"},"assets":{"bucket":"assets"}}`)})
 	result, err := manager.Reload(ctx)
 	if err != nil {
 		t.Fatal(err)

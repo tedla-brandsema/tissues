@@ -103,6 +103,14 @@ Authentication enforcement remains independently optional and preserves exact
 safe local return URLs. Secrets are tagged and redacted from configuration
 diagnostics.
 
+Existing Issues may own private JPEG or PNG assets in Cloud Storage. Uploads
+are limited to 6 MiB, decoded and freshly encoded server-side, constrained to a
+1200-pixel longest edge and 1 MiB stored size, and served only through
+authenticated same-origin API URLs. Original uploads and source metadata are
+not retained. Pixel orientation is authoritative in this slice; JPEGs that
+depend on EXIF orientation may display unrotated. Production and local dogfood
+use separate private buckets.
+
 The shared installation contains Projects keyed by immutable uppercase prefixes
 such as `FLUENT`. The product presents that key as the Project ID. Each Project
 transactionally allocates immutable Issue numbers, producing a stable,

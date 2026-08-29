@@ -46,6 +46,8 @@ cat >"$PROFILE_FILE" <<EOF
 server:
   host: ${HOST}
   port: ${PORT}
+  read_timeout: 60s
+  write_timeout: 60s
 
 auth:
   enabled: true
@@ -57,6 +59,8 @@ auth:
 
 tissues:
   enabled: true
+  assets:
+    bucket: tissues-dev-tissues-assets-dogfood
   storage:
     project_id: ${PROJECT_ID}
     namespace: tissues-dogfood-projects
@@ -87,6 +91,7 @@ echo
 echo "  Project:   ${PROJECT_ID}"
 echo "  URL:       ${ORIGIN}/?view=open"
 echo "  Datastore: tissues-dogfood-projects"
+echo "  Assets:    gs://tissues-dev-tissues-assets-dogfood"
 echo "  Profile:   ${PROFILE_FILE}"
 echo
 echo "Open this in your browser:"

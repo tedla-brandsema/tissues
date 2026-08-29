@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -15,9 +16,12 @@ import (
 type Service struct {
 	profile    service.Profile[Config]
 	repo       Repository
+	assets     AssetStore
 	httpClient *http.Client
 	now        func() time.Time
 	newID      IDGenerator
+	imageSlots chan struct{}
+	process    imageProcessor
 }
 
 var _ service.Service = (*Service)(nil)
@@ -33,23 +37,126 @@ func WithHTTPClient(client *http.Client) Option {
 	return func(s *Service) { s.httpClient = client }
 }
 
-func New(profile service.Profile[Config], repo Repository, options ...Option) (*Service, error) {
+func New(profile service.Profile[Config], repo Repository, assets AssetStore, options ...Option) (*Service, error) {
 	if profile == nil {
 		return nil, fmt.Errorf("tissues profile is required")
 	}
 	if repo == nil {
 		return nil, fmt.Errorf("tissues repository is required")
 	}
+	if assets == nil {
+		return nil, fmt.Errorf("tissues asset store is required")
+	}
 	if err := profile.Current().Config.ValidateConfig(); err != nil {
 		return nil, err
 	}
-	svc := &Service{profile: profile, repo: repo, now: time.Now, newID: NewID}
+	svc := &Service{profile: profile, repo: repo, assets: assets, now: time.Now, newID: NewID, imageSlots: make(chan struct{}, 1), process: processImage}
 	for _, option := range options {
 		if option != nil {
 			option(svc)
 		}
 	}
 	return svc, nil
+}
+
+func (s *Service) acquireImageSlot(ctx context.Context) error {
+	select {
+	case s.imageSlots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Service) releaseImageSlot() { <-s.imageSlots }
+
+func (s *Service) UploadAsset(ctx context.Context, issueValue, filename string, input io.Reader) (*Asset, error) {
+	issue, err := s.GetIssue(ctx, issueValue)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.acquireImageSlot(ctx); err != nil {
+		return nil, err
+	}
+	processed, err := func() (processedImage, error) {
+		defer s.releaseImageSlot()
+		data, err := readUploadBytes(input)
+		if err != nil {
+			return processedImage{}, err
+		}
+		return s.process(filename, data)
+	}()
+	if err != nil {
+		if errors.Is(err, ErrTooLarge) || errors.Is(err, ErrInvalid) || errors.Is(err, ErrInternal) {
+			return nil, err
+		}
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return nil, fmt.Errorf("%w: upload request exceeds the multipart limit", ErrTooLarge)
+		}
+		return nil, fmt.Errorf("%w: read image upload: %v", ErrInternal, err)
+	}
+	return s.putProcessedAsset(ctx, issue, processed)
+}
+
+func readUploadBytes(input io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(input, MaxUploadBytes))
+	if err != nil {
+		return nil, err
+	}
+	var extra [1]byte
+	n, err := input.Read(extra[:])
+	if n > 0 {
+		return nil, fmt.Errorf("%w: image file exceeds %d bytes", ErrTooLarge, MaxUploadBytes)
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return data, nil
+}
+
+func (s *Service) putProcessedAsset(ctx context.Context, issue *Issue, processed processedImage) (*Asset, error) {
+	key := AssetKey{ProjectKey: issue.ProjectKey, IssueNumber: issue.Number, Name: processed.Name}
+	asset, err := s.assets.Put(ctx, key, AssetWrite{ContentType: processed.ContentType, Width: processed.Width, Height: processed.Height, Data: processed.Data})
+	if err != nil {
+		return nil, assetStoreError(err)
+	}
+	return asset, nil
+}
+
+func (s *Service) ListAssets(ctx context.Context, issueValue string) ([]*Asset, error) {
+	issue, err := s.GetIssue(ctx, issueValue)
+	if err != nil {
+		return nil, err
+	}
+	assets, err := s.assets.List(ctx, IssueRef{ProjectKey: issue.ProjectKey, Number: issue.Number})
+	if err != nil {
+		return nil, assetStoreError(err)
+	}
+	return assets, nil
+}
+
+func (s *Service) OpenAsset(ctx context.Context, issueValue, filename string) (*AssetContent, error) {
+	issue, err := s.GetIssue(ctx, issueValue)
+	if err != nil {
+		return nil, err
+	}
+	name, _, err := canonicalAssetName(filename)
+	if err != nil {
+		return nil, err
+	}
+	content, err := s.assets.Open(ctx, AssetKey{ProjectKey: issue.ProjectKey, IssueNumber: issue.Number, Name: name})
+	if err != nil {
+		return nil, assetStoreError(err)
+	}
+	return content, nil
+}
+
+func assetStoreError(err error) error {
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrConflict) || errors.Is(err, ErrInvalid) {
+		return err
+	}
+	return fmt.Errorf("%w: asset storage: %v", ErrInternal, err)
 }
 
 func (*Service) Name() string { return "tissues" }

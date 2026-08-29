@@ -7,7 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"mime/multipart"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,8 +18,9 @@ import (
 )
 
 const (
-	apiBasePath = "/api/tissues/v1"
-	maxJSONBody = 64 << 10
+	apiBasePath         = "/api/tissues/v1"
+	maxJSONBody         = 64 << 10
+	maxAssetRequestBody = MaxUploadBytes + 64*1024
 )
 
 type projectDTO struct {
@@ -52,6 +55,14 @@ type commentDTO struct {
 	Created string `json:"created"`
 	Updated string `json:"updated"`
 	Body    string `json:"body"`
+}
+type assetDTO struct {
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	ContentType string `json:"content_type"`
+	Width       int    `json:"width"`
+	Height      int    `json:"height"`
+	Size        int64  `json:"size"`
 }
 type errorEnvelope struct {
 	Error struct {
@@ -96,7 +107,134 @@ func (s *Service) apiHandler() http.Handler {
 	mux.HandleFunc("POST "+apiBasePath+"/issues/{id}/reopen", s.reopenIssueHTTP)
 	mux.HandleFunc("POST "+apiBasePath+"/issues/{id}/comments", s.addCommentHTTP)
 	mux.HandleFunc("PATCH "+apiBasePath+"/issues/{id}/comments/{commentID}", s.editCommentHTTP)
+	mux.HandleFunc("POST "+apiBasePath+"/issues/{id}/assets", s.uploadAssetHTTP)
+	mux.HandleFunc("GET "+apiBasePath+"/issues/{id}/assets", s.listAssetsHTTP)
+	mux.HandleFunc("GET "+apiBasePath+"/issues/{id}/assets/{filename}", s.getAssetHTTP)
 	return mux
+}
+
+func (s *Service) uploadAssetHTTP(w http.ResponseWriter, r *http.Request) {
+	issue, err := s.GetIssue(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	if err := s.acquireImageSlot(r.Context()); err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	processed, err := func() (processedImage, error) {
+		defer s.releaseImageSlot()
+		r.Body = http.MaxBytesReader(w, r.Body, maxAssetRequestBody)
+		filename, data, err := readAssetMultipart(r)
+		if err != nil {
+			return processedImage{}, err
+		}
+		return s.process(filename, data)
+	}()
+	if err != nil {
+		if errors.Is(err, ErrTooLarge) {
+			writeAPIError(w, http.StatusRequestEntityTooLarge, "too_large", err.Error())
+		} else if errors.Is(err, ErrInvalid) || errors.Is(err, ErrInternal) {
+			writeServiceError(w, r, err)
+		} else {
+			writeRequestError(w, err)
+		}
+		return
+	}
+	asset, err := s.putProcessedAsset(r.Context(), issue, processed)
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, toAssetDTO(asset))
+}
+
+func readAssetMultipart(r *http.Request) (string, []byte, error) {
+	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/form-data" || params["boundary"] == "" {
+		return "", nil, fmt.Errorf("Content-Type must be multipart/form-data with a boundary")
+	}
+	reader := multipart.NewReader(r.Body, params["boundary"])
+	part, err := reader.NextPart()
+	if err != nil {
+		return "", nil, multipartError(err)
+	}
+	defer part.Close()
+	disposition, dispositionParams, err := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+	if err != nil || disposition != "form-data" || dispositionParams["name"] != "file" {
+		return "", nil, fmt.Errorf("multipart body must contain exactly one file part named file")
+	}
+	filename, present := dispositionParams["filename"]
+	if !present || filename == "" {
+		return "", nil, fmt.Errorf("multipart body must contain exactly one file part named file")
+	}
+	if _, _, err := canonicalAssetName(filename); err != nil {
+		return "", nil, err
+	}
+	data, err := readUploadBytes(part)
+	if err != nil {
+		return "", nil, multipartError(err)
+	}
+	if next, err := reader.NextPart(); err == nil {
+		_ = next.Close()
+		return "", nil, fmt.Errorf("multipart body must contain exactly one file part named file")
+	} else if !errors.Is(err, io.EOF) {
+		return "", nil, multipartError(err)
+	}
+	return filename, data, nil
+}
+
+func multipartError(err error) error {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return fmt.Errorf("%w: upload request exceeds %d bytes", ErrTooLarge, maxAssetRequestBody)
+	}
+	return fmt.Errorf("malformed multipart body: %w", err)
+}
+
+func (s *Service) listAssetsHTTP(w http.ResponseWriter, r *http.Request) {
+	assets, err := s.ListAssets(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	sort.Slice(assets, func(i, j int) bool { return assets[i].Key.Name < assets[j].Key.Name })
+	out := struct {
+		Assets []assetDTO `json:"assets"`
+	}{Assets: make([]assetDTO, 0, len(assets))}
+	for _, asset := range assets {
+		out.Assets = append(out.Assets, toAssetDTO(asset))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Service) getAssetHTTP(w http.ResponseWriter, r *http.Request) {
+	content, err := s.OpenAsset(r.Context(), r.PathValue("id"), r.PathValue("filename"))
+	if err != nil {
+		writeServiceError(w, r, err)
+		return
+	}
+	defer content.Body.Close()
+	etag := fmt.Sprintf("\"%d\"", content.Asset.Generation)
+	if r.Header.Get("If-None-Match") == etag {
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", content.Asset.ContentType)
+	w.Header().Set("Content-Length", strconv.FormatInt(content.Asset.Size, 10))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"", content.Asset.Key.Name))
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("ETag", etag)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if _, err := io.Copy(w, content.Body); err != nil {
+		slog.ErrorContext(r.Context(), "stream tissues asset", "error", err)
+	}
+}
+
+func toAssetDTO(asset *Asset) assetDTO {
+	return assetDTO{Name: asset.Key.Name, URL: fmt.Sprintf("%s/issues/%s-%d/assets/%s", apiBasePath, asset.Key.ProjectKey, asset.Key.IssueNumber, asset.Key.Name), ContentType: asset.ContentType, Width: asset.Width, Height: asset.Height, Size: asset.Size}
 }
 
 func (s *Service) listProjectsHTTP(w http.ResponseWriter, r *http.Request) {
@@ -375,6 +513,8 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 		writeAPIError(w, http.StatusNotFound, "not_found", "resource not found")
 	case errors.Is(err, ErrConflict):
 		writeAPIError(w, http.StatusConflict, "conflict", "request conflicts with current state")
+	case errors.Is(err, ErrTooLarge):
+		writeAPIError(w, http.StatusRequestEntityTooLarge, "too_large", "image upload is too large")
 	default:
 		slog.ErrorContext(r.Context(), "tissues API request failed", "method", r.Method, "path", r.URL.Path, "error", err)
 		writeAPIError(w, http.StatusInternalServerError, "internal", "internal server error")

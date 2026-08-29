@@ -10,6 +10,7 @@ RUNTIME_SERVICE_ACCOUNT_NAME="tissues-runtime"
 RUNTIME_SERVICE_ACCOUNT="${RUNTIME_SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 AUTH_NAMESPACE="tissues-auth"
 TISSUES_NAMESPACE="tissues"
+TISSUES_ASSET_BUCKET="tissues-dev-tissues-assets-production"
 AUTH_SIGNING_SECRET="tissues-auth-signing-secret"
 CLIENT_SECRET="tissues-client-secret"
 SESSION_SECRET="tissues-session-secret"
@@ -133,6 +134,37 @@ grant_secret_access() {
     --quiet >/dev/null
 }
 
+ensure_asset_bucket() {
+  local bucket="gs://${TISSUES_ASSET_BUCKET}"
+  local properties
+  if ! properties="$(gcloud storage buckets describe "${bucket}" \
+    --project="${PROJECT_ID}" \
+    --format='value(location,default_storage_class,uniform_bucket_level_access,public_access_prevention,versioning_enabled)' 2>/dev/null)"; then
+    echo "Creating production asset bucket: ${bucket}"
+    gcloud storage buckets create "${bucket}" \
+      --project="${PROJECT_ID}" \
+      --location="${REGION}" \
+      --default-storage-class=STANDARD \
+      --uniform-bucket-level-access \
+      --public-access-prevention \
+      --quiet
+    properties="$(gcloud storage buckets describe "${bucket}" \
+      --project="${PROJECT_ID}" \
+      --format='value(location,default_storage_class,uniform_bucket_level_access,public_access_prevention,versioning_enabled)')"
+  else
+    echo "Reusing production asset bucket: ${bucket}"
+  fi
+  if [[ "${properties}" != $'EUROPE-WEST4\tSTANDARD\tTrue\tenforced\t' ]]; then
+    echo "Asset bucket ${bucket} has incompatible location, storage class, access, or versioning settings: ${properties}" >&2
+    exit 1
+  fi
+  gcloud storage buckets add-iam-policy-binding "${bucket}" \
+    --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
+    --role=roles/storage.objectUser \
+    --condition=None \
+    --quiet >/dev/null
+}
+
 ensure_prerequisites() {
   echo "Ensuring required Google Cloud APIs are enabled..."
   gcloud services enable \
@@ -141,6 +173,7 @@ ensure_prerequisites() {
     cloudbuild.googleapis.com \
     secretmanager.googleapis.com \
     datastore.googleapis.com \
+    storage.googleapis.com \
     --project="${PROJECT_ID}" \
     --quiet
 
@@ -179,6 +212,8 @@ ensure_prerequisites() {
     --role=roles/datastore.user \
     --condition=None \
     --quiet >/dev/null
+
+  ensure_asset_bucket
 
   ensure_generated_secret "${AUTH_SIGNING_SECRET}"
   ensure_generated_secret "${CLIENT_SECRET}"
@@ -223,6 +258,7 @@ echo "Cloud Run service            : ${SERVICE_NAME}"
 echo "Artifact image               : ${IMAGE_URI}"
 echo "Production Datastore namespace: ${TISSUES_NAMESPACE}"
 echo "Auth Datastore namespace     : ${AUTH_NAMESPACE}"
+echo "Production asset bucket      : ${TISSUES_ASSET_BUCKET}"
 echo "----------------------------------------"
 
 ensure_prerequisites
@@ -264,7 +300,7 @@ if [[ ! "${PUBLIC_ORIGIN}" =~ ^https://[^/]+$ ]]; then
   exit 1
 fi
 
-NON_SECRET_ENV="TISSUES_AUTH_ENABLED=true,TISSUES_AUTH_CLIENT_ID=tissues,TISSUES_AUTH_CLIENT_REDIRECT_URI=${PUBLIC_ORIGIN}/tissues/auth/callback,TISSUES_AUTH_PROJECT_ID=${PROJECT_ID},TISSUES_AUTH_DATASTORE_NS=${AUTH_NAMESPACE},TISSUES_AUTH_INSECURE_COOKIE=false,TISSUES_TISSUES_ENABLED=true,TISSUES_TISSUES_STORAGE_PROJECT_ID=${PROJECT_ID},TISSUES_TISSUES_STORAGE_NAMESPACE=${TISSUES_NAMESPACE},TISSUES_TISSUES_AUTH_ENABLED=true,TISSUES_TISSUES_AUTH_BROKER_URL=${PUBLIC_ORIGIN},TISSUES_TISSUES_AUTH_CLIENT_ID=tissues,TISSUES_TISSUES_AUTH_REDIRECT_URI=${PUBLIC_ORIGIN}/tissues/auth/callback,TISSUES_TISSUES_AUTH_INSECURE_COOKIE=false"
+NON_SECRET_ENV="TISSUES_SERVER_READ_TIMEOUT=60s,TISSUES_SERVER_WRITE_TIMEOUT=60s,TISSUES_AUTH_ENABLED=true,TISSUES_AUTH_CLIENT_ID=tissues,TISSUES_AUTH_CLIENT_REDIRECT_URI=${PUBLIC_ORIGIN}/tissues/auth/callback,TISSUES_AUTH_PROJECT_ID=${PROJECT_ID},TISSUES_AUTH_DATASTORE_NS=${AUTH_NAMESPACE},TISSUES_AUTH_INSECURE_COOKIE=false,TISSUES_TISSUES_ENABLED=true,TISSUES_TISSUES_STORAGE_PROJECT_ID=${PROJECT_ID},TISSUES_TISSUES_STORAGE_NAMESPACE=${TISSUES_NAMESPACE},TISSUES_TISSUES_ASSETS_BUCKET=${TISSUES_ASSET_BUCKET},TISSUES_TISSUES_AUTH_ENABLED=true,TISSUES_TISSUES_AUTH_BROKER_URL=${PUBLIC_ORIGIN},TISSUES_TISSUES_AUTH_CLIENT_ID=tissues,TISSUES_TISSUES_AUTH_REDIRECT_URI=${PUBLIC_ORIGIN}/tissues/auth/callback,TISSUES_TISSUES_AUTH_INSECURE_COOKIE=false"
 SECRET_ENV="TISSUES_AUTH_SIGNING_SECRET=${AUTH_SIGNING_SECRET}:latest,TISSUES_AUTH_CLIENT_SECRET=${CLIENT_SECRET}:latest,TISSUES_AUTH_IDENTITY_API_KEY=${IDENTITY_API_KEY_SECRET}:latest,TISSUES_TISSUES_AUTH_CLIENT_SECRET=${CLIENT_SECRET}:latest,TISSUES_TISSUES_AUTH_SESSION_SECRET=${SESSION_SECRET}:latest"
 PRODUCTION_ACCESS_FLAG="--allow-unauthenticated"
 if [[ "${FIRST_DEPLOYMENT}" == true ]]; then

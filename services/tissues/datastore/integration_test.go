@@ -17,6 +17,18 @@ import (
 	tissuesds "github.com/tedla-brandsema/tissues/services/tissues/datastore"
 )
 
+type unusedAssetStore struct{}
+
+func (unusedAssetStore) Put(context.Context, tissues.AssetKey, tissues.AssetWrite) (*tissues.Asset, error) {
+	return nil, errors.New("unused")
+}
+func (unusedAssetStore) Open(context.Context, tissues.AssetKey) (*tissues.AssetContent, error) {
+	return nil, errors.New("unused")
+}
+func (unusedAssetStore) List(context.Context, tissues.IssueRef) ([]*tissues.Asset, error) {
+	return nil, errors.New("unused")
+}
+
 func TestRealDatastoreProjectsReferencesAndConcurrentAllocation(t *testing.T) {
 	if os.Getenv("TISSUES_GCP_INTEGRATION") != "1" {
 		t.Skip("set TISSUES_GCP_INTEGRATION=1 for real Datastore test")
@@ -42,7 +54,7 @@ func TestRealDatastoreProjectsReferencesAndConcurrentAllocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile, err := config.NewServiceProfile("integration", tissues.Config{Enabled: true, Storage: tissues.StorageConfig{ProjectID: projectID, Namespace: namespace}})
+	profile, err := config.NewServiceProfile("integration", tissues.Config{Enabled: true, Storage: tissues.StorageConfig{ProjectID: projectID, Namespace: namespace}, Assets: tissues.AssetsConfig{Bucket: "unused"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +62,7 @@ func TestRealDatastoreProjectsReferencesAndConcurrentAllocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := tissues.New(slot, repo)
+	svc, err := tissues.New(slot, repo, unusedAssetStore{})
 	if err != nil {
 		t.Fatal(err)
 	}

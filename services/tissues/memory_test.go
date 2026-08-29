@@ -1,9 +1,11 @@
 package tissues
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"sync"
@@ -19,6 +21,59 @@ type memoryRepository struct {
 	issues   map[string]map[string]*Issue
 	refs     map[string]map[int64]string
 	comments map[string]map[string]map[string]*Comment
+}
+
+type memoryAssetStore struct {
+	mu     sync.Mutex
+	assets map[AssetKey]struct {
+		asset Asset
+		data  []byte
+	}
+	nextGeneration int64
+}
+
+func newMemoryAssetStore() *memoryAssetStore {
+	return &memoryAssetStore{assets: make(map[AssetKey]struct {
+		asset Asset
+		data  []byte
+	})}
+}
+
+func (m *memoryAssetStore) Put(_ context.Context, key AssetKey, write AssetWrite) (*Asset, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextGeneration++
+	asset := Asset{Key: key, ContentType: write.ContentType, Width: write.Width, Height: write.Height, Size: int64(len(write.Data)), Generation: m.nextGeneration}
+	m.assets[key] = struct {
+		asset Asset
+		data  []byte
+	}{asset: asset, data: bytes.Clone(write.Data)}
+	copy := asset
+	return &copy, nil
+}
+
+func (m *memoryAssetStore) Open(_ context.Context, key AssetKey) (*AssetContent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	stored, ok := m.assets[key]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &AssetContent{Asset: stored.asset, Body: io.NopCloser(bytes.NewReader(stored.data))}, nil
+}
+
+func (m *memoryAssetStore) List(_ context.Context, ref IssueRef) ([]*Asset, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*Asset
+	for key, stored := range m.assets {
+		if key.ProjectKey == ref.ProjectKey && key.IssueNumber == ref.Number {
+			asset := stored.asset
+			out = append(out, &asset)
+		}
+	}
+	SortAssets(out)
+	return out, nil
 }
 
 func newMemoryRepository() *memoryRepository {
@@ -334,6 +389,10 @@ func (m *memoryRepository) copy() *memoryRepository {
 }
 
 func testService(t *testing.T, repo Repository) *Service {
+	return testServiceWithAssets(t, repo, newMemoryAssetStore())
+}
+
+func testServiceWithAssets(t *testing.T, repo Repository, assets AssetStore) *Service {
 	t.Helper()
 	profile, err := config.NewServiceProfile("test", Config{})
 	if err != nil {
@@ -343,7 +402,7 @@ func testService(t *testing.T, repo Repository) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := New(slot, repo)
+	svc, err := New(slot, repo, assets)
 	if err != nil {
 		t.Fatal(err)
 	}

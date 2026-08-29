@@ -9,12 +9,14 @@ import (
 	"os"
 
 	gcds "cloud.google.com/go/datastore"
+	"cloud.google.com/go/storage"
 	coreconfig "github.com/tedla-brandsema/tissues/lib/core/config"
 	"github.com/tedla-brandsema/tissues/lib/server"
 	"github.com/tedla-brandsema/tissues/lib/service"
 	authservice "github.com/tedla-brandsema/tissues/services/auth"
 	"github.com/tedla-brandsema/tissues/services/tissues"
 	tissuesds "github.com/tedla-brandsema/tissues/services/tissues/datastore"
+	tissuesgcs "github.com/tedla-brandsema/tissues/services/tissues/gcs"
 )
 
 const serverName = "tissues"
@@ -123,7 +125,18 @@ func compose(ctx context.Context, profile coreconfig.Profile[appConfig]) (*serve
 			closeOnError()
 			return nil, nil, repoErr
 		}
-		tissuesService, serviceErr := tissues.New(tissuesSlot, repository)
+		assetClient, assetClientErr := storage.NewClient(ctx)
+		if assetClientErr != nil {
+			closeOnError()
+			return nil, nil, fmt.Errorf("create tissues GCS client: %w", assetClientErr)
+		}
+		closers = append(closers, assetClient.Close)
+		assetStore, assetStoreErr := tissuesgcs.New(assetClient, profile.Config.Tissues.Assets.Bucket)
+		if assetStoreErr != nil {
+			closeOnError()
+			return nil, nil, assetStoreErr
+		}
+		tissuesService, serviceErr := tissues.New(tissuesSlot, repository, assetStore)
 		if serviceErr != nil {
 			closeOnError()
 			return nil, nil, serviceErr
