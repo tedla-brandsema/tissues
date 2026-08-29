@@ -16,6 +16,15 @@ export type Issue = {
 };
 export type IssueOverview = Pick<Issue, "project_key" | "number" | "id" | "title" | "state" | "parent_id" | "updated">;
 export type IssueOverviewPage = { issues: IssueOverview[]; next_cursor: string };
+export type Asset = {
+  name: string;
+  url: string;
+  content_type: "image/png" | "image/jpeg";
+  width: number;
+  height: number;
+  size: number;
+};
+export type AssetList = { assets: Asset[] };
 
 type ErrorEnvelope = { error?: { kind?: string; message?: string } };
 export class APIError extends Error {
@@ -64,6 +73,12 @@ export const api = {
   state: (id: string, state: "close" | "reopen") => request<Issue>(`/issues/${encodeURIComponent(id)}/${state}`, json("POST", {})),
   comment: (id: string, author: string, body: string) => request<Comment>(`/issues/${encodeURIComponent(id)}/comments`, json("POST", author ? { author, body } : { body })),
   editComment: (id: string, commentID: string, body: string) => request<Comment>(`/issues/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentID)}`, json("PATCH", { body })),
+  listAssets: (id: string) => request<AssetList>(`/issues/${encodeURIComponent(id)}/assets`),
+  uploadAsset: (id: string, file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return request<Asset>(`/issues/${encodeURIComponent(id)}/assets`, { method: "POST", body });
+  },
 };
 
 export async function listAllProjects(): Promise<Project[]> {

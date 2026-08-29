@@ -10,6 +10,11 @@ const issue = {
 };
 const secondIssue = { ...issue, id: "FLUENT-2", number: 2, title: "Parent candidate", comments: [] };
 const tissuesIssue = { ...issue, id: "TISSUES-4", project_key: "TISSUES", number: 4, title: "Tissues fixture", state: "closed", comments: [] };
+type AssetDTO = { name: string; url: string; content_type: "image/png" | "image/jpeg"; width: number; height: number; size: number };
+type AssetState = { assets: AssetDTO[]; uploadFailures?: number };
+const existingAsset: AssetDTO = { name: "existing.png", url: "/api/tissues/v1/issues/FLUENT-1/assets/existing.png", content_type: "image/png", width: 40, height: 30, size: 2048 };
+const replacementAsset: AssetDTO = { ...existingAsset, name: "example.png", url: "/api/tissues/v1/issues/FLUENT-1/assets/example.png" };
+const tinyPNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
 type MockOptions = {
   observe?: (method: string, pathname: string, body: string) => void;
@@ -20,6 +25,7 @@ type MockOptions = {
   createdIssueGETGate?: Promise<void>;
   createdIssueID?: string;
   projectGETGate?: Promise<void>;
+  assetState?: AssetState;
 };
 
 async function mockTissuesAPI(page: Page, options: MockOptions = {}) {
@@ -28,6 +34,7 @@ async function mockTissuesAPI(page: Page, options: MockOptions = {}) {
     { project_key: "FLUENT", number: 1, id: "FLUENT-1", title: issue.title, state: "open", parent_id: "", updated: timestamp },
     { project_key: "TISSUES", number: 4, id: "TISSUES-4", title: tissuesIssue.title, state: "closed", parent_id: "FLUENT-1", updated: timestamp },
   ], next_cursor: "" } };
+  const assetState = options.assetState || { assets: [] };
   await page.route("**/api/tissues/v1/**", async (route) => {
     const request = route.request(); const url = new URL(request.url()); const pathname = url.pathname; const method = request.method(); const body = request.postData() || "";
     options.observe?.(method, pathname, body);
@@ -45,6 +52,14 @@ async function mockTissuesAPI(page: Page, options: MockOptions = {}) {
       const result = issuePages[url.searchParams.get("cursor") || ""] || { issues: [], next_cursor: "" }; const project = url.searchParams.get("project");
       return route.fulfill({ json: project ? { ...result, issues: result.issues.filter((entry: any) => entry.project_key === project) } : result });
     }
+    if (pathname.endsWith("/issues/FLUENT-1/assets") && method === "GET") return route.fulfill({ json: { assets: assetState.assets } });
+    if (pathname.endsWith("/issues/FLUENT-1/assets") && method === "POST") {
+      if ((assetState.uploadFailures || 0) > 0) { assetState.uploadFailures = (assetState.uploadFailures || 0) - 1; return route.fulfill({ status: 409, json: { error: { kind: "conflict", message: "Image changed; retry upload" } } }); }
+      const uploaded: AssetDTO = { name: "example.png", url: "/api/tissues/v1/issues/FLUENT-1/assets/example.png", content_type: "image/png", width: 1200, height: 800, size: 483221 };
+      assetState.assets = [...assetState.assets.filter((asset) => asset.name !== uploaded.name), uploaded];
+      return route.fulfill({ status: 201, json: uploaded });
+    }
+    if (/\/issues\/FLUENT-1\/assets\/[^/]+$/.test(pathname) && method === "GET") return route.fulfill({ status: 200, contentType: "image/png", body: tinyPNG });
     if (pathname.endsWith("/issues/FLUENT-1/parent") && method === "PUT") {
       const failure = options.parentFailure?.(); if (failure) return route.fulfill({ status: failure.status, json: { error: { kind: failure.status === 404 ? "not_found" : "invalid", message: failure.message } } });
       const payload = JSON.parse(body); if (options.state) options.state.parentID = payload.parent_id; return route.fulfill({ json: { ...issue, parent_id: payload.parent_id, state: options.state?.value || issue.state } });
@@ -178,7 +193,7 @@ test("Issue content and hierarchy use separate workflows and failed parent input
   await mockTissuesAPI(page, { state, observe: (method, pathname, body) => { if (method === "PATCH" && pathname.endsWith("/issues/FLUENT-1")) patchBody = body; if (method === "PUT" && pathname.endsWith("/parent")) putBody = body; }, parentFailure: () => fail ? { status: 404, message: "resource not found" } : undefined });
   await page.goto("/?view=issue&issue=FLUENT-1"); await expect(page.getByText("FLUENT", { exact: true }).last()).toBeVisible(); await expect(page.getByText("FLUENT-1", { exact: true }).last()).toBeVisible();
   await expect(page.getByText("Issue ID", { exact: true })).toBeVisible(); await expect(page.getByText("Project ID", { exact: true })).toBeVisible(); await expect(page.getByLabel("Parent issue ID")).toHaveCount(0); await expect(page.locator(".main-view")).not.toContainText(/Reference|\bRef\b/);
-  const actions = await page.locator(".form-actions").boundingBox(); const separator = await page.locator(".issue-section-separator").boundingBox(); const commentsHeading = await page.getByRole("heading", { name: /Comments/ }).boundingBox(); expect(actions && separator && commentsHeading).toBeTruthy(); expect(separator!.y - (actions!.y + actions!.height)).toBeGreaterThanOrEqual(16); expect(commentsHeading!.y).toBeGreaterThan(separator!.y + separator!.height);
+  const actions = await page.locator(".form-actions").boundingBox(); const separator = await page.locator(".issue-section-separator").last().boundingBox(); const commentsHeading = await page.getByRole("heading", { name: /Comments/ }).boundingBox(); expect(actions && separator && commentsHeading).toBeTruthy(); expect(separator!.y).toBeGreaterThan(actions!.y + actions!.height); expect(commentsHeading!.y).toBeGreaterThan(separator!.y + separator!.height);
   await page.getByLabel("Title").fill("Changed title"); const descriptionGroup = page.getByRole("group", { name: "Description" }); await expectInactiveCrepeChrome(descriptionGroup); const descriptionEditor = descriptionGroup.locator(".ProseMirror"); await descriptionEditor.locator("p").first().click(); await page.keyboard.press("End"); await page.keyboard.insertText(" Changed body"); await expect(descriptionEditor).toContainText("Changed body"); await page.waitForTimeout(1000); await page.getByRole("button", { name: "Save" }).click();
   await expect.poll(() => patchBody).not.toBe(""); expect(JSON.parse(patchBody)).toEqual({ title: "Changed title", description: expect.stringContaining("Changed body") }); await expect(page.getByText("Issue saved")).toBeVisible();
   await page.getByRole("button", { name: "Set parent" }).click(); await page.getByLabel("Parent issue ID").fill("FLUENT-2"); await page.getByRole("button", { name: "Save parent" }).click(); await expect.poll(() => putBody).not.toBe(""); expect(JSON.parse(putBody)).toEqual({ parent_id: "FLUENT-2" }); await expect(page.getByText("Parent updated")).toBeVisible();
@@ -196,6 +211,107 @@ test("Close and Reopen require Radix confirmation and provide feedback", async (
   await expect.poll(() => closeCalls).toBe(1); await expect(page.getByText("Issue closed")).toBeVisible(); await expect(page.getByRole("button", { name: "Reopen issue" })).toBeVisible();
   await page.getByRole("button", { name: "Reopen issue" }).click(); expect(reopenCalls).toBe(0); await expect(page.getByRole("alertdialog")).toContainText("Reopen FLUENT-1?"); await page.getByRole("alertdialog").getByRole("button", { name: "Cancel" }).click(); expect(reopenCalls).toBe(0);
   await page.getByRole("button", { name: "Reopen issue" }).click(); await page.getByRole("alertdialog").getByRole("button", { name: "Reopen issue" }).click(); await expect.poll(() => reopenCalls).toBe(1); await expect(page.getByText("Issue reopened")).toBeVisible();
+});
+
+test("image management is exclusive to existing Issues", async ({ page }) => {
+  await mockTissuesAPI(page);
+  await page.goto("/?view=issue&mode=create");
+  await expect(page.getByRole("heading", { name: "Create issue" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Images" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Upload image" })).toHaveCount(0);
+  await page.goto("/?view=issue&issue=FLUENT-1");
+  await expect(page.getByRole("heading", { name: "Images" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Upload image" })).toBeVisible();
+});
+
+test("real file upload creates a private Issue attachment without changing Markdown", async ({ page }) => {
+  let assetPosts = 0; let uploadContentType = ""; let patchCalls = 0; const observedPaths: string[] = []; const browserRequests: string[] = [];
+  page.on("request", (request) => {
+    browserRequests.push(request.url());
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/tissues/v1/issues/FLUENT-1/assets") uploadContentType = request.headers()["content-type"] || "";
+  });
+  await mockTissuesAPI(page, { observe: (method, pathname, body) => {
+    observedPaths.push(pathname);
+    if (method === "POST" && pathname === "/api/tissues/v1/issues/FLUENT-1/assets") assetPosts++;
+    if (method === "PATCH" && pathname.endsWith("/issues/FLUENT-1")) patchCalls++;
+  } });
+  await page.goto("/?view=issue&issue=FLUENT-1");
+  await page.getByRole("button", { name: "Upload image" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Image file").setInputFiles({ name: "Example.PNG", mimeType: "image/png", buffer: tinyPNG });
+  await expect(dialog.getByText("Example.PNG", { exact: true })).toBeVisible();
+  const localPreview = dialog.getByAltText("Selected image preview"); await expect(localPreview).toBeVisible(); await expect(localPreview).toHaveAttribute("src", /^blob:/);
+  await expect(dialog.getByLabel("Image description / Alt text")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Upload", exact: true }).click();
+  await expect.poll(() => assetPosts).toBe(1); expect(uploadContentType).toMatch(/^multipart\/form-data; boundary=/); await expect(dialog.getByText("example.png", { exact: true })).toBeVisible(); await expect(dialog.getByText("1200 × 800 · 472 KB")).toBeVisible();
+  const processed = dialog.locator(".upload-result img"); await expect(processed).toHaveAttribute("src", "/api/tissues/v1/issues/FLUENT-1/assets/example.png?preview=1");
+  await expect.poll(() => processed.evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true);
+  await expect(dialog.getByRole("button", { name: /Insert|Copy Markdown/ })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByRole("region", { name: "Images" }).getByRole("button", { name: "View example.png" })).toBeVisible();
+  expect(patchCalls).toBe(0);
+  expect(observedPaths.some((pathname) => pathname.includes("storage.googleapis.com") || pathname.includes("googleapis.com"))).toBe(false);
+  expect(browserRequests.some((url) => url.includes("storage.googleapis.com") || url.includes("googleapis.com"))).toBe(false);
+  await expect(page.locator("body")).not.toContainText("storage.googleapis.com");
+});
+
+test("an existing private attachment opens an accessible large preview", async ({ page }) => {
+  const browserRequests: string[] = []; page.on("request", (request) => browserRequests.push(request.url()));
+  await mockTissuesAPI(page, { assetState: { assets: [existingAsset] } });
+  await page.goto("/?view=issue&issue=FLUENT-1"); const images = page.getByRole("region", { name: "Images" });
+  await expect(images.getByText("existing.png", { exact: true })).toBeVisible(); await expect(images.getByText("40 × 30 · 2 KB")).toBeVisible();
+  const thumbnail = images.locator('img[src="/api/tissues/v1/issues/FLUENT-1/assets/existing.png"]'); await expect.poll(() => thumbnail.evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true);
+  const previewButton = images.getByRole("button", { name: "View existing.png" }); await previewButton.focus(); await page.keyboard.press("Enter");
+  const preview = page.getByRole("dialog"); await expect(preview).toBeVisible(); await expect(preview.getByRole("heading", { name: "existing.png" })).toBeVisible(); await expect(preview.getByText("40 × 30 · 2 KB")).toBeVisible();
+  const largeImage = preview.getByAltText("Preview of existing.png"); await expect(largeImage).toHaveAttribute("src", existingAsset.url); await expect.poll(() => largeImage.evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true);
+  expect(browserRequests.some((url) => url.includes("storage.googleapis.com") || url.includes("googleapis.com"))).toBe(false); await expect(page.locator("body")).not.toContainText("storage.googleapis.com");
+  await page.keyboard.press("Escape"); await expect(preview).toBeHidden(); await expect(previewButton).toBeFocused();
+});
+
+test("same-name replacement refreshes the list thumbnail without changing canonical identity", async ({ page }) => {
+  const assetState: AssetState = { assets: [replacementAsset] }; const assetRequests: string[] = [];
+  page.on("request", (request) => { if (new URL(request.url()).pathname === replacementAsset.url) assetRequests.push(request.url()); });
+  await mockTissuesAPI(page, { assetState }); await page.goto("/?view=issue&issue=FLUENT-1");
+  const images = page.getByRole("region", { name: "Images" }); const initialThumbnail = images.locator(".asset-card img");
+  await expect(initialThumbnail).toHaveAttribute("src", replacementAsset.url);
+  await expect.poll(() => initialThumbnail.evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true);
+  expect(assetRequests.some((requestURL) => new URL(requestURL).search === "")).toBe(true);
+
+  await images.getByRole("button", { name: "Upload image" }).click(); const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Image file").setInputFiles({ name: "example.png", mimeType: "image/png", buffer: tinyPNG });
+  await dialog.getByRole("button", { name: "Upload", exact: true }).click();
+  await expect(dialog.getByText("1200 × 800 · 472 KB")).toBeVisible();
+  await expect(dialog.locator(".upload-result img")).toHaveAttribute("src", `${replacementAsset.url}?preview=1`);
+  await dialog.getByRole("button", { name: "Done" }).click();
+
+  await expect(images.getByText("example.png", { exact: true })).toHaveCount(1);
+  await expect(images.getByText("1200 × 800 · 472 KB")).toBeVisible();
+  const refreshedThumbnail = images.locator(".asset-card img"); await expect(refreshedThumbnail).toHaveAttribute("src", `${replacementAsset.url}?preview=1`);
+  await expect.poll(() => refreshedThumbnail.evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true);
+  const refreshedRequest = assetRequests.find((requestURL) => new URL(requestURL).searchParams.get("preview") === "1");
+  expect(refreshedRequest).toBeTruthy(); expect(new URL(refreshedRequest!).origin).toBe(new URL(page.url()).origin);
+  const previewButton = images.getByRole("button", { name: "View example.png" }); await previewButton.click(); const preview = page.getByRole("dialog");
+  const previewImage = preview.getByAltText("Preview of example.png"); await expect(previewImage).toHaveAttribute("src", `${replacementAsset.url}?preview=1`); await expect.poll(() => previewImage.evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true);
+  await expect(preview.getByRole("heading", { name: "example.png" })).toBeVisible(); await expect(preview.getByText("1200 × 800 · 472 KB")).toBeVisible(); await preview.getByRole("button", { name: "Close" }).click(); await expect(preview).toBeHidden();
+  expect(assetState.assets).toHaveLength(1); expect(assetState.assets[0].url).toBe(replacementAsset.url);
+  expect(assetRequests.some((requestURL) => requestURL.includes("storage.googleapis.com") || requestURL.includes("googleapis.com"))).toBe(false);
+  await expect(page.locator("body")).not.toContainText("storage.googleapis.com");
+});
+
+test("upload validation, retryable backend errors, and narrow dialog containment", async ({ page }) => {
+  const assetState: AssetState = { assets: [], uploadFailures: 1 }; let assetPosts = 0;
+  await mockTissuesAPI(page, { assetState, observe: (method, pathname) => { if (method === "POST" && pathname.endsWith("/issues/FLUENT-1/assets")) assetPosts++; } });
+  await page.setViewportSize({ width: 375, height: 700 }); await page.goto("/?view=issue&issue=FLUENT-1"); await page.getByRole("button", { name: "Upload image" }).click();
+  const dialog = page.getByRole("dialog"); const input = dialog.getByLabel("Image file");
+  await input.setInputFiles({ name: "too-large.png", mimeType: "image/png", buffer: Buffer.alloc(6 * 1024 * 1024 + 1) }); await expect(dialog.getByRole("alert")).toContainText("exceeds the 6 MiB"); expect(assetPosts).toBe(0);
+  await input.setInputFiles({ name: "notes.gif", mimeType: "image/gif", buffer: Buffer.from("gif") }); await expect(dialog.getByRole("alert")).toContainText("Choose a PNG or JPEG"); expect(assetPosts).toBe(0);
+  await input.setInputFiles({ name: "example.png", mimeType: "image/png", buffer: tinyPNG }); await expect(dialog.getByAltText("Selected image preview")).toBeVisible();
+  await expectContained(await dialog.boundingBox(), page.viewportSize()); expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await dialog.getByRole("button", { name: "Upload", exact: true }).click(); await expect(dialog.getByRole("alert")).toContainText("Image changed; retry upload"); await expect(dialog).toBeVisible(); await expect(page.getByLabel("Title")).toBeEnabled();
+  await dialog.getByRole("button", { name: "Upload", exact: true }).click(); await expect(dialog.getByText("example.png", { exact: true })).toBeVisible(); expect(assetPosts).toBe(2); await expectContained(await dialog.boundingBox(), page.viewportSize()); expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await dialog.getByRole("button", { name: "Done" }).click(); const images = page.getByRole("region", { name: "Images" }); await images.getByRole("button", { name: "View example.png" }).click();
+  const preview = page.getByRole("dialog"); await expectContained(await preview.boundingBox(), page.viewportSize()); expect(await preview.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true); await expect(preview.getByAltText("Preview of example.png")).toBeVisible(); await expect(preview.getByRole("button", { name: "Close" })).toBeVisible();
+  expect(await page.locator("html").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true); await preview.getByRole("button", { name: "Close" }).click(); await expect(preview).toBeHidden();
 });
 
 test("Crepe editors retain accepted styling and generated Markdown", async ({ page }, testInfo) => {

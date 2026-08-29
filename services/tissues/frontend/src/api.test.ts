@@ -32,4 +32,40 @@ describe("tissues API client", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error: { message: "authentication required" } }), { status: 401 }));
     await expect(api.listProjects()).rejects.toBeInstanceOf(UnauthorizedError);
   });
+
+  it("lists assets using the encoded Issue route", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ assets: [] }), { status: 200 }));
+    await expect(api.listAssets("FLUENT/1")).resolves.toEqual({ assets: [] });
+    expect(fetchMock).toHaveBeenCalledWith("/api/tissues/v1/issues/FLUENT%2F1/assets", undefined);
+  });
+
+  it("uploads one file field as FormData without setting multipart Content-Type", async () => {
+    const asset = { name: "example.png", url: "/api/tissues/v1/issues/FLUENT-1/assets/example.png", content_type: "image/png", width: 2, height: 3, size: 80 };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(asset), { status: 201 }));
+    const file = new File(["png"], "Example.PNG", { type: "image/png" });
+    await expect(api.uploadAsset("FLUENT-1", file)).resolves.toEqual(asset);
+    const [path, init] = fetchMock.mock.calls[0];
+    expect(path).toBe("/api/tissues/v1/issues/FLUENT-1/assets");
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBeInstanceOf(FormData);
+    expect([...((init?.body as FormData).entries())]).toEqual([["file", file]]);
+    expect(new Headers(init?.headers).has("Content-Type")).toBe(false);
+  });
+
+  it.each([
+    [400, "invalid"],
+    [409, "conflict"],
+    [413, "too_large"],
+  ])("preserves structured upload error %s", async (status, kind) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error: { kind, message: `asset ${kind}` } }), { status }));
+    const error = await api.uploadAsset("FLUENT-1", new File(["x"], "x.png")).catch((cause) => cause);
+    expect(error).toBeInstanceOf(APIError);
+    expect(error).toMatchObject({ status, kind, message: `asset ${kind}` });
+  });
+
+  it("preserves UnauthorizedError for asset requests", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error: { kind: "unauthorized", message: "authentication required" } }), { status: 401 }));
+    await expect(api.listAssets("FLUENT-1")).rejects.toBeInstanceOf(UnauthorizedError);
+    await expect(api.uploadAsset("FLUENT-1", new File(["x"], "x.png"))).rejects.toBeInstanceOf(UnauthorizedError);
+  });
 });

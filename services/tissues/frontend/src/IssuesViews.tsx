@@ -12,6 +12,7 @@ import { Separator } from "@tissues/frontend/components/ui/separator";
 import { Skeleton } from "@tissues/frontend/components/ui/skeleton";
 import { APIError, api, Comment, Issue, IssueOverview, listAllProjects, Project } from "./api";
 import { AuthBootstrap } from "./auth";
+import { IssueAssets } from "./IssueAssets";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { ParentIssueInput } from "./ParentIssueInput";
 import { Route } from "./routes";
@@ -199,7 +200,6 @@ export function IssueView({ route, navigate, handleError, bootstrap }: { route: 
     if (!issue || !editingComment) return;
     const edited = await api.editComment(issue.id, editingComment.id, body); setIssue({ ...issue, comments: issue.comments.map((item) => item.id === edited.id ? edited : item) }); setEditingComment(undefined); toast.success("Comment updated");
   }
-
   if (loading) return <div className="form-view skeletons"><Skeleton /><Skeleton /><Skeleton /></div>;
   if (pageError) return <div className="error-state"><p>{pageError}</p><Button variant="outline" onClick={() => location.reload()}><RefreshCw /> Try again</Button></div>;
   if (create && !projects.length) return <div className="welcome"><h1>Create an Issue</h1><p>An Issue needs a Project. Create a Project first.</p><Button onClick={() => navigate({ view: "project", mode: "create" })}>Create project</Button></div>;
@@ -213,7 +213,7 @@ export function IssueView({ route, navigate, handleError, bootstrap }: { route: 
       <div className="form-actions"><Button type="button" variant="outline" onClick={() => navigate({ view: "issues" })}>{create ? "Cancel" : "Back"}</Button><Button type="submit" disabled={pending || !projectKey || !title.trim() || !description.trim()}>{create ? "Create" : "Save"}</Button>{!create && <Button type="button" variant="outline" disabled={pending} onClick={() => setParentOpen(true)}>{issue?.parent_id ? "Change parent" : "Set parent"}</Button>}{!create && <Button type="button" variant="outline" disabled={pending} onClick={() => setConfirmState(issue?.state === "open" ? "close" : "reopen")}>{issue?.state === "open" ? "Close issue" : "Reopen issue"}</Button>}</div>
     </form>
     {!create && <div className="issue-relationship"><div><span>Parent</span><strong>{issue?.parent_id || "None"}</strong></div></div>}
-    {!create && <><Separator className="issue-section-separator" /><section className="comments"><h2>Comments <span>{issue?.comments.length}</span></h2>{(issue?.comments ?? []).map((item) => <article key={item.id}><div><strong>{item.author}</strong><time>{new Date(item.created).toLocaleString()}{item.updated !== item.created ? " (edited)" : ""}</time><Button variant="ghost" size="sm" onClick={() => setEditingComment(item)}>Edit</Button></div><div className="markdown comment-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.body}</ReactMarkdown></div></article>)}
+    {!create && issue && <><Separator className="issue-section-separator issue-assets-separator" /><IssueAssets issueID={issue.id} handleError={handleError} /><Separator className="issue-section-separator" /><section className="comments"><h2>Comments <span>{issue.comments.length}</span></h2>{issue.comments.map((item) => <article key={item.id}><div><strong>{item.author}</strong><time>{new Date(item.created).toLocaleString()}{item.updated !== item.created ? " (edited)" : ""}</time><Button variant="ghost" size="sm" onClick={() => setEditingComment(item)}>Edit</Button></div><div className="markdown comment-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.body}</ReactMarkdown></div></article>)}
       <form onSubmit={addComment} className="comment-form"><h3><MessageSquarePlus /> Add comment</h3>{bootstrap.enabled ? <p className="comment-identity">Commenting as <strong>{bootstrap.author}</strong></p> : <Input aria-label="Comment author" required placeholder="Your name or email" value={author} onChange={(event) => setAuthor(event.target.value)} />}<MarkdownEditor key={`${issue?.id}-${commentEditor}`} label="Comment body" value={comment} onChange={setComment} size="compact" />{commentError && <p className="form-error" role="alert">{commentError}</p>}<Button type="submit" disabled={pending || !comment.trim()}>Comment</Button></form>
     </section></>}
     {editingComment && <CommentDialog key={editingComment.id} comment={editingComment} onClose={() => setEditingComment(undefined)} onSave={saveComment} />}
