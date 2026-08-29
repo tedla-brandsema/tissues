@@ -89,6 +89,11 @@ func (rp *RP) SessionMiddleware(next, unauthenticated http.Handler) http.Handler
 
 func (rp *RP) LoginHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if target, ok := rp.canonicalLoginTarget(r); ok {
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+
 		next := strings.TrimSpace(r.URL.Query().Get("next"))
 		if next == "" || !isSafeRedirect(next) {
 			next = "/"
@@ -126,6 +131,22 @@ func (rp *RP) LoginHandler() http.Handler {
 		u.RawQuery = q.Encode()
 		http.Redirect(w, r, u.String(), http.StatusFound)
 	})
+}
+
+func (rp *RP) canonicalLoginTarget(r *http.Request) (string, bool) {
+	redirectURI, err := url.Parse(strings.TrimSpace(rp.cfg.RedirectURI))
+	if err != nil || redirectURI.Host == "" || (redirectURI.Scheme != "http" && redirectURI.Scheme != "https") {
+		return "", false
+	}
+	if strings.EqualFold(r.Host, redirectURI.Host) {
+		return "", false
+	}
+	return (&url.URL{
+		Scheme:   redirectURI.Scheme,
+		Host:     redirectURI.Host,
+		Path:     rp.cfg.LoginPath,
+		RawQuery: r.URL.RawQuery,
+	}).String(), true
 }
 
 func (rp *RP) CallbackHandler() http.Handler {

@@ -93,7 +93,9 @@ func TestAuthEnabledPreservesExactOriginalRequestURI(t *testing.T) {
 		t.Fatalf("login=%q", loginLocation)
 	}
 	login := httptest.NewRecorder()
-	mux.ServeHTTP(login, httptest.NewRequest(http.MethodGet, loginLocation, nil))
+	loginRequest := httptest.NewRequest(http.MethodGet, loginLocation, nil)
+	loginRequest.Host = "tissues.example.test"
+	mux.ServeHTTP(login, loginRequest)
 	brokerLocation, _ := url.Parse(login.Header().Get("Location"))
 	callbackReq := httptest.NewRequest(http.MethodGet, rpCallbackPath+"?code=code&state="+url.QueryEscape(brokerLocation.Query().Get("state")), nil)
 	callbackReq.AddCookie(login.Result().Cookies()[0])

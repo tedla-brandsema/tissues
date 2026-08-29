@@ -20,7 +20,9 @@ func TestRelyingPartyCookiesAreSecureByDefault(t *testing.T) {
 		Secret:      []byte("test-only-secret"),
 	})
 	recorder := httptest.NewRecorder()
-	rp.LoginHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	request := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	request.Host = "tissues.example.test"
+	rp.LoginHandler().ServeHTTP(recorder, request)
 
 	cookies := recorder.Result().Cookies()
 	if len(cookies) != 1 {
@@ -50,7 +52,9 @@ func TestRelyingPartyCallbackPreservesExactURLAndIdentity(t *testing.T) {
 	})
 	next := "/?view=open&selected=abc"
 	loginRecorder := httptest.NewRecorder()
-	rp.LoginHandler().ServeHTTP(loginRecorder, httptest.NewRequest(http.MethodGet, "/auth/login?next="+url.QueryEscape(next), nil))
+	loginRequest := httptest.NewRequest(http.MethodGet, "/auth/login?next="+url.QueryEscape(next), nil)
+	loginRequest.Host = "tissues.example.test"
+	rp.LoginHandler().ServeHTTP(loginRecorder, loginRequest)
 	brokerLocation, _ := url.Parse(loginRecorder.Header().Get("Location"))
 	callbackRequest := httptest.NewRequest(http.MethodGet, "/auth/callback?code=code&state="+url.QueryEscape(brokerLocation.Query().Get("state")), nil)
 	callbackRequest.AddCookie(loginRecorder.Result().Cookies()[0])
@@ -88,7 +92,9 @@ func TestRelyingPartyRejectsUnsafeNext(t *testing.T) {
 	rp := NewRP(RPConfig{BrokerURL: "https://auth.example.test", ClientID: "tissues", RedirectURI: "https://tissues.example.test/auth/callback", Secret: []byte("secret")})
 	for _, target := range []string{"https://evil.example/", "//evil.example/"} {
 		recorder := httptest.NewRecorder()
-		rp.LoginHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/auth/login?next="+url.QueryEscape(target), nil))
+		request := httptest.NewRequest(http.MethodGet, "/auth/login?next="+url.QueryEscape(target), nil)
+		request.Host = "tissues.example.test"
+		rp.LoginHandler().ServeHTTP(recorder, request)
 		var state rpState
 		if err := decodeSigned(recorder.Result().Cookies()[0].Value, rp.cfg.Secret, &state); err != nil {
 			t.Fatal(err)
@@ -127,7 +133,9 @@ func TestRelyingPartyInsecureCookieRequiresExplicitOptIn(t *testing.T) {
 		InsecureCookie: true,
 	})
 	recorder := httptest.NewRecorder()
-	rp.LoginHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	request := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	request.Host = "127.0.0.1:8080"
+	rp.LoginHandler().ServeHTTP(recorder, request)
 
 	cookies := recorder.Result().Cookies()
 	if len(cookies) != 1 {
@@ -135,5 +143,69 @@ func TestRelyingPartyInsecureCookieRequiresExplicitOptIn(t *testing.T) {
 	}
 	if cookies[0].Secure {
 		t.Fatal("state cookie Secure = true, want false for explicit local opt-in")
+	}
+}
+
+func TestRelyingPartyCanonicalizesLoginHostBeforeCreatingState(t *testing.T) {
+	rp := NewRP(RPConfig{
+		BrokerURL:      "http://127.0.0.1:18080",
+		ClientID:       "tissues",
+		RedirectURI:    "http://127.0.0.1:18080/tissues/auth/callback",
+		LoginPath:      "/tissues/auth/login",
+		Secret:         []byte("test-only-secret"),
+		InsecureCookie: true,
+	})
+	const rawQuery = "next=%2F%3Fview%3Dissue%26issue%3DFLUENT-1"
+	noncanonical := httptest.NewRequest(http.MethodGet, "http://localhost:18080/tissues/auth/login?"+rawQuery, nil)
+	noncanonicalRecorder := httptest.NewRecorder()
+	rp.LoginHandler().ServeHTTP(noncanonicalRecorder, noncanonical)
+
+	const canonicalLogin = "http://127.0.0.1:18080/tissues/auth/login?" + rawQuery
+	if noncanonicalRecorder.Code != http.StatusFound || noncanonicalRecorder.Header().Get("Location") != canonicalLogin {
+		t.Fatalf("noncanonical login = %d %q, want %d %q", noncanonicalRecorder.Code, noncanonicalRecorder.Header().Get("Location"), http.StatusFound, canonicalLogin)
+	}
+	if cookies := noncanonicalRecorder.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("noncanonical login set %d cookies, want none", len(cookies))
+	}
+
+	canonical := httptest.NewRequest(http.MethodGet, canonicalLogin, nil)
+	canonicalRecorder := httptest.NewRecorder()
+	rp.LoginHandler().ServeHTTP(canonicalRecorder, canonical)
+	if canonicalRecorder.Code != http.StatusFound {
+		t.Fatalf("canonical login status = %d, want %d", canonicalRecorder.Code, http.StatusFound)
+	}
+	brokerLocation, err := url.Parse(canonicalRecorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if brokerLocation.Scheme != "http" || brokerLocation.Host != "127.0.0.1:18080" || brokerLocation.Path != "/authorize" {
+		t.Fatalf("canonical login location = %q, want normal broker authorize URL", brokerLocation.String())
+	}
+	cookies := canonicalRecorder.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != stateCookieName {
+		t.Fatalf("canonical login cookies = %#v, want one %s cookie", cookies, stateCookieName)
+	}
+	if cookies[0].Domain != "" {
+		t.Fatalf("state cookie Domain = %q, want host-only", cookies[0].Domain)
+	}
+	var state rpState
+	if err := decodeSigned(cookies[0].Value, rp.cfg.Secret, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Nonce == "" || state.Nonce != brokerLocation.Query().Get("state") {
+		t.Fatalf("cookie nonce %q does not match authorize state %q", state.Nonce, brokerLocation.Query().Get("state"))
+	}
+}
+
+func TestRelyingPartyInvalidRedirectURIDoesNotPanic(t *testing.T) {
+	for _, redirectURI := range []string{"://invalid", "/tissues/auth/callback", "mailto:user@example.test"} {
+		t.Run(redirectURI, func(t *testing.T) {
+			rp := NewRP(RPConfig{BrokerURL: "https://auth.example.test", ClientID: "tissues", RedirectURI: redirectURI, Secret: []byte("test-only-secret")})
+			recorder := httptest.NewRecorder()
+			rp.LoginHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+			if recorder.Code != http.StatusFound {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusFound)
+			}
+		})
 	}
 }
