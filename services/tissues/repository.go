@@ -37,7 +37,7 @@ type Repository interface {
 	ListIssueOverviewsPage(context.Context, PageRequest) (*IssueOverviewPage, error)
 	GetProject(context.Context, string) (*Project, error)
 	ListIssues(context.Context, string) ([]*Issue, error)
-	ResolveIssue(context.Context, IssueRef) (*Issue, error)
+	GetIssue(context.Context, IssueRef) (*Issue, error)
 	RunInTransaction(context.Context, func(Transaction) error) error
 }
 
@@ -47,11 +47,11 @@ type Repository interface {
 type Transaction interface {
 	GetProject(context.Context, string) (*Project, error)
 	PutProject(context.Context, *Project) error
-	GetIssue(context.Context, string, string) (*Issue, error)
-	ResolveIssue(context.Context, IssueRef) (*Issue, error)
-	PutIssueRef(context.Context, IssueRef, string) error
-	GetComment(context.Context, string, string, string) (*Comment, error)
-	ListComments(context.Context, string, string) ([]*Comment, error)
+	GetIssue(context.Context, IssueRef) (*Issue, error)
+	// PutIssue is also the intentional per-Issue serialization fence used by
+	// AddComment. Persistence implementations must not elide that call.
 	PutIssue(context.Context, *Issue) error
-	PutComment(context.Context, string, string, *Comment) error
+	GetComment(context.Context, IssueRef, string) (*Comment, error)
+	GetLastComment(context.Context, IssueRef) (*Comment, error)
+	PutComment(context.Context, IssueRef, *Comment) error
 }

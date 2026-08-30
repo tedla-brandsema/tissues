@@ -10,21 +10,18 @@ import (
 	"github.com/tedla-brandsema/tissues/services/tissues"
 )
 
-func TestProjectIssueReferenceCommentKeyAncestry(t *testing.T) {
+func TestProjectIssueCommentKeyAncestry(t *testing.T) {
 	s := &Store{namespace: "example"}
 	project := s.projectKey("FLUENT")
 	if project.Kind != ProjectKind || project.Name != "FLUENT" || project.Parent != nil || project.Namespace != "example" {
 		t.Fatalf("project = %#v", project)
 	}
-	issue := s.issueKey("FLUENT", "aaaaaaaaaaaaaaaaaaaaaaaaaa")
-	if issue.Kind != IssueKind || issue.Parent == nil || issue.Parent.Name != "FLUENT" || issue.Parent.Kind != ProjectKind {
+	ref := tissues.IssueRef{ProjectKey: "FLUENT", Number: 17}
+	issue := s.issueKey(ref)
+	if issue.Kind != IssueKind || issue.Name != "FLUENT-17" || issue.Parent == nil || issue.Parent.Name != "FLUENT" || issue.Parent.Kind != ProjectKind {
 		t.Fatalf("issue = %#v", issue)
 	}
-	ref := s.issueRefKey(tissues.IssueRef{ProjectKey: "FLUENT", Number: 17})
-	if ref.Kind != IssueRefKind || ref.Name != "17" || ref.Parent == nil || ref.Parent.Name != "FLUENT" {
-		t.Fatalf("ref = %#v", ref)
-	}
-	comment := s.commentKey("FLUENT", issue.Name, "bbbbbbbbbbbbbbbbbbbbbbbbbb")
+	comment := s.commentKey(ref, "bbbbbbbbbbbbbbbbbbbbbbbbbb")
 	if comment.Kind != CommentKind || comment.Parent == nil || comment.Parent.Name != issue.Name || comment.Parent.Parent == nil || comment.Parent.Parent.Name != "FLUENT" {
 		t.Fatalf("comment = %#v", comment)
 	}
@@ -42,22 +39,16 @@ func TestEntityMappingAndNoIndex(t *testing.T) {
 		t.Fatalf("project = %#v", decoded)
 	}
 
-	issue := &tissues.Issue{ID: "aaaaaaaaaaaaaaaaaaaaaaaaaa", ProjectKey: "FLUENT", Number: 17, Ref: "FLUENT-17", Title: "title", State: tissues.StateOpen, Created: now, Updated: now, Description: "**markdown**", ParentID: "bbbbbbbbbbbbbbbbbbbbbbbbbb", ParentRef: "FLUENT-3", Children: []*tissues.Issue{{ID: "derived"}}, Comments: []*tissues.Comment{{ID: "derived"}}}
+	issue := &tissues.Issue{ProjectKey: "FLUENT", Number: 17, Ref: "FLUENT-17", Title: "title", State: tissues.StateOpen, Created: now, Updated: now, Description: "**markdown**", ParentRef: "FLUENT-3", Children: []*tissues.Issue{{Ref: "derived"}}, Comments: []*tissues.Comment{{ID: "derived"}}}
 	props, err = gcds.SaveStruct(encodeIssue(issue))
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertProperties(t, props, map[string]bool{"Number": false, "Title": false, "State": false, "Created": false, "Updated": false, "Description": true, "ParentID": false})
-	decodedIssue := decodeIssue("FLUENT", issue.ID, encodeIssue(issue))
-	if decodedIssue.ID != issue.ID || decodedIssue.Number != 17 || decodedIssue.Ref != "FLUENT-17" || decodedIssue.ParentRef != "" || len(decodedIssue.Children) != 0 {
+	assertProperties(t, props, map[string]bool{"Number": false, "Title": false, "State": false, "Created": false, "Updated": false, "Description": true, "ParentRef": false})
+	decodedIssue := decodeIssue(tissues.IssueRef{ProjectKey: "FLUENT", Number: 17}, encodeIssue(issue))
+	if decodedIssue.Number != 17 || decodedIssue.Ref != "FLUENT-17" || decodedIssue.ParentRef != "FLUENT-3" || len(decodedIssue.Children) != 0 {
 		t.Fatalf("issue = %#v", decodedIssue)
 	}
-
-	refProps, err := gcds.SaveStruct(&issueRefEntity{IssueID: issue.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertProperties(t, refProps, map[string]bool{"IssueID": false})
 	comment := &tissues.Comment{ID: "cccccccccccccccccccccccccc", Author: "agent", Created: now, Updated: now, Body: "body"}
 	props, err = gcds.SaveStruct(encodeComment(comment))
 	if err != nil {

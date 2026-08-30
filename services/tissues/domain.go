@@ -104,11 +104,10 @@ func (r IssueRef) Validate() error {
 	return nil
 }
 
-// Issue is the one and only issue type. ParentID is canonical relationship
-// data; Ref and ParentRef are derived views; Children and Comments are derived
+// Issue is the one and only issue type. Ref is its canonical identity and
+// ParentRef is canonical relationship data; Children and Comments are derived
 // repository views.
 type Issue struct {
-	ID          string
 	ProjectKey  string
 	Number      int64
 	Ref         string
@@ -117,7 +116,6 @@ type Issue struct {
 	Created     time.Time
 	Updated     time.Time
 	Description string
-	ParentID    string
 	ParentRef   string
 	Children    []*Issue
 	Comments    []*Comment
@@ -134,36 +132,30 @@ type Comment struct {
 func Timestamp(t time.Time) time.Time { return t.UTC() }
 
 func (i *Issue) Validate() error {
-	if !ValidID(i.ID) {
-		return fmt.Errorf("issue: malformed ID %q", i.ID)
-	}
 	key, err := CanonicalProjectKey(i.ProjectKey)
 	if err != nil || key != i.ProjectKey {
-		return fmt.Errorf("issue %s: invalid project key %q", i.ID, i.ProjectKey)
+		return fmt.Errorf("issue %q: invalid project key %q", i.Ref, i.ProjectKey)
 	}
 	if i.Number <= 0 {
-		return fmt.Errorf("issue %s: number must be positive", i.ID)
+		return fmt.Errorf("issue %q: number must be positive", i.Ref)
 	}
 	wantRef := (IssueRef{ProjectKey: i.ProjectKey, Number: i.Number}).String()
 	if i.Ref != wantRef {
-		return fmt.Errorf("issue %s: reference %q disagrees with %q", i.ID, i.Ref, wantRef)
+		return fmt.Errorf("issue %q: reference disagrees with %q", i.Ref, wantRef)
 	}
-	if err := validLine("issue "+i.ID+": title", i.Title); err != nil {
+	if err := validLine("issue "+i.Ref+": title", i.Title); err != nil {
 		return err
 	}
 	if !i.State.Valid() {
-		return fmt.Errorf("issue %s: invalid state %q", i.ID, i.State)
-	}
-	if i.ParentID != "" && !ValidID(i.ParentID) {
-		return fmt.Errorf("issue %s: malformed parent ID %q", i.ID, i.ParentID)
+		return fmt.Errorf("issue %s: invalid state %q", i.Ref, i.State)
 	}
 	if i.ParentRef != "" {
 		parentRef, err := ParseIssueRef(i.ParentRef)
-		if err != nil || parentRef.ProjectKey != i.ProjectKey {
-			return fmt.Errorf("issue %s: invalid parent reference %q", i.ID, i.ParentRef)
+		if err != nil || parentRef.String() != i.ParentRef || parentRef.ProjectKey != i.ProjectKey {
+			return fmt.Errorf("issue %s: invalid parent reference %q", i.Ref, i.ParentRef)
 		}
 	}
-	return validTimes("issue "+i.ID, i.Created, i.Updated)
+	return validTimes("issue "+i.Ref, i.Created, i.Updated)
 }
 
 func (c *Comment) Validate() error {
@@ -200,7 +192,7 @@ func sortIssues(issues []*Issue) {
 		if a.Number > b.Number {
 			return 1
 		}
-		return strings.Compare(a.ID, b.ID)
+		return strings.Compare(a.Ref, b.Ref)
 	})
 	for _, issue := range issues {
 		sortIssues(issue.Children)

@@ -88,13 +88,13 @@ func TestRealDatastoreProjectsReferencesAndConcurrentAllocation(t *testing.T) {
 			t.Fatalf("TISSUES issue = %#v, %v", issue, err)
 		}
 	}
-	originalID, originalNumber, originalRef := fluent[1].ID, fluent[1].Number, fluent[1].Ref
+	originalNumber, originalRef := fluent[1].Number, fluent[1].Ref
 	for _, parent := range []string{"FLUENT-1", "FLUENT-3", "", "FLUENT-1"} {
 		moved, err := svc.MoveIssue(ctx, fluent[1].Ref, parent)
 		if err != nil {
 			t.Fatalf("move to %q: %v", parent, err)
 		}
-		if moved.ID != originalID || moved.Number != originalNumber || moved.Ref != originalRef {
+		if moved.Number != originalNumber || moved.Ref != originalRef {
 			t.Fatal("move changed immutable identity")
 		}
 	}
@@ -117,6 +117,33 @@ func TestRealDatastoreProjectsReferencesAndConcurrentAllocation(t *testing.T) {
 	if err != nil || read.ParentRef != "FLUENT-1" {
 		t.Fatalf("hierarchy read = %#v, %v", read, err)
 	}
+	commentRef := tissues.IssueRef{ProjectKey: "FLUENT", Number: 2}
+	futureCommentTime := time.Date(2098, 1, 1, 0, 0, 0, 123, time.UTC)
+	seedComment := &tissues.Comment{ID: "cccccccccccccccccccccccccc", Author: "seed", Created: futureCommentTime, Updated: futureCommentTime, Body: "seed"}
+	if err := repo.RunInTransaction(ctx, func(tx tissues.Transaction) error {
+		issue, err := tx.GetIssue(ctx, commentRef)
+		if err != nil {
+			return err
+		}
+		if err := tx.PutComment(ctx, commentRef, seedComment); err != nil {
+			return err
+		}
+		return tx.PutIssue(ctx, issue)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	nextComment, err := svc.AddComment(ctx, commentRef.String(), "Ada", "next")
+	if err != nil || !nextComment.Created.Equal(futureCommentTime.Add(time.Nanosecond)) {
+		t.Fatalf("transactional latest Comment = %#v, %v", nextComment, err)
+	}
+	projectKey := gcds.NameKey(tissuesds.ProjectKind, "FLUENT", nil)
+	projectKey.Namespace = namespace
+	issueKeyForComments := gcds.NameKey(tissuesds.IssueKind, commentRef.String(), projectKey)
+	issueKeyForComments.Namespace = namespace
+	commentKeys, err := client.GetAll(ctx, gcds.NewQuery(tissuesds.CommentKind).Namespace(namespace).Ancestor(issueKeyForComments).KeysOnly(), nil)
+	if err != nil || len(commentKeys) != 2 {
+		t.Fatalf("canonical Comment ancestry = %d, %v", len(commentKeys), err)
+	}
 
 	const concurrent = 6
 	created := make([]*tissues.Issue, concurrent)
@@ -131,19 +158,19 @@ func TestRealDatastoreProjectsReferencesAndConcurrentAllocation(t *testing.T) {
 	}
 	wg.Wait()
 	numbers := make([]int, 0, concurrent)
-	seenRefs, seenIDs := map[string]bool{}, map[string]bool{}
+	seenRefs := map[string]bool{}
 	for i, issue := range created {
 		if errs[i] != nil {
 			t.Fatalf("concurrent create %d: %v", i, errs[i])
 		}
-		if seenRefs[issue.Ref] || seenIDs[issue.ID] {
+		if seenRefs[issue.Ref] {
 			t.Fatalf("duplicate concurrent identity: %#v", issue)
 		}
-		seenRefs[issue.Ref], seenIDs[issue.ID] = true, true
+		seenRefs[issue.Ref] = true
 		numbers = append(numbers, int(issue.Number))
-		resolved, err := repo.ResolveIssue(ctx, tissues.IssueRef{ProjectKey: "FLUENT", Number: issue.Number})
-		if err != nil || resolved.ID != issue.ID {
-			t.Fatalf("index %s = %#v, %v", issue.Ref, resolved, err)
+		resolved, err := repo.GetIssue(ctx, tissues.IssueRef{ProjectKey: "FLUENT", Number: issue.Number})
+		if err != nil || resolved.Ref != issue.Ref {
+			t.Fatalf("canonical lookup %s = %#v, %v", issue.Ref, resolved, err)
 		}
 	}
 	sort.Ints(numbers)
@@ -156,13 +183,17 @@ func TestRealDatastoreProjectsReferencesAndConcurrentAllocation(t *testing.T) {
 	if err != nil || project.NextIssueNumber != 10 {
 		t.Fatalf("allocator = %#v, %v", project, err)
 	}
-	projectKey := gcds.NameKey(tissuesds.ProjectKind, "FLUENT", nil)
-	projectKey.Namespace = namespace
-	refKeys, err := client.GetAll(ctx, gcds.NewQuery(tissuesds.IssueRefKind).Namespace(namespace).Ancestor(projectKey).KeysOnly(), nil)
-	if err != nil || len(refKeys) != 9 {
-		t.Fatalf("reference indexes = %d, %v", len(refKeys), err)
+	issueKeys, err := client.GetAll(ctx, gcds.NewQuery(tissuesds.IssueKind).Namespace(namespace).Ancestor(projectKey).KeysOnly(), nil)
+	if err != nil || len(issueKeys) != 9 {
+		t.Fatalf("canonical Issue keys = %d, %v", len(issueKeys), err)
 	}
-	t.Logf("per-project refs verified; concurrent committed numbers=%v; allocator next=%d", numbers, project.NextIssueNumber)
+	for _, key := range issueKeys {
+		ref, parseErr := tissues.ParseIssueRef(key.Name)
+		if parseErr != nil || ref.ProjectKey != "FLUENT" {
+			t.Fatalf("noncanonical Issue key %#v", key)
+		}
+	}
+	t.Logf("canonical Issue keys verified; concurrent committed numbers=%v; allocator next=%d", numbers, project.NextIssueNumber)
 
 	if _, err := svc.CreateProject(ctx, "TELONAUTICS"); err != nil {
 		t.Fatal(err)
@@ -240,53 +271,40 @@ func TestRealDatastoreProjectsReferencesAndConcurrentAllocation(t *testing.T) {
 func assertOverviewCorruptionDetection(t *testing.T, ctx context.Context, client *gcds.Client, repo *tissuesds.Store, namespace string) {
 	t.Helper()
 	future := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
-	issueProperties := func(number int64, parentID string) gcds.PropertyList {
+	issueProperties := func(number int64, parentRef string) gcds.PropertyList {
 		return gcds.PropertyList{
 			{Name: "Number", Value: number}, {Name: "Title", Value: "corrupt"}, {Name: "State", Value: "open"},
-			{Name: "Created", Value: future}, {Name: "Updated", Value: future}, {Name: "Description", Value: "body", NoIndex: true}, {Name: "ParentID", Value: parentID},
+			{Name: "Created", Value: future}, {Name: "Updated", Value: future}, {Name: "Description", Value: "body", NoIndex: true}, {Name: "ParentRef", Value: parentRef},
 		}
 	}
 	projectKey := gcds.NameKey(tissuesds.ProjectKind, "FLUENT", nil)
 	projectKey.Namespace = namespace
-	check := func(name string, issueKey, refKey *gcds.Key, refIssueID string) {
+	check := func(name string, issueKey *gcds.Key) {
 		t.Helper()
-		properties := issueProperties(map[string]int64{"missing-ref": 999, "bad-index": 998, "missing-parent": 997, "bad-ancestry": 996}[name], map[string]string{"missing-parent": "yyyyyyyyyyyyyyyyyyyyyyyyyy"}[name])
+		properties := issueProperties(map[string]int64{"bad-key": 999, "key-mismatch": 998, "missing-parent": 997, "bad-ancestry": 996}[name], map[string]string{"missing-parent": "FLUENT-123456"}[name])
 		if _, err := client.Put(ctx, issueKey, &properties); err != nil {
 			t.Fatal(err)
-		}
-		if refKey != nil {
-			if _, err := client.Put(ctx, refKey, &gcds.PropertyList{{Name: "IssueID", Value: refIssueID}}); err != nil {
-				t.Fatal(err)
-			}
 		}
 		if _, err := repo.ListIssueOverviewsPage(ctx, tissues.PageRequest{Size: 1}); !errors.Is(err, tissues.ErrInternal) {
 			t.Fatalf("%s corruption = %v", name, err)
 		}
-		keys := []*gcds.Key{issueKey}
-		if refKey != nil {
-			keys = append(keys, refKey)
-		}
-		if err := client.DeleteMulti(ctx, keys); err != nil {
+		if err := client.Delete(ctx, issueKey); err != nil {
 			t.Fatal(err)
 		}
 	}
-	missingRefIssue := gcds.NameKey(tissuesds.IssueKind, "zzzzzzzzzzzzzzzzzzzzzzzzzz", projectKey)
-	missingRefIssue.Namespace = namespace
-	check("missing-ref", missingRefIssue, nil, "")
-	badIndexIssue := gcds.NameKey(tissuesds.IssueKind, "xxxxxxxxxxxxxxxxxxxxxxxxxx", projectKey)
-	badIndexIssue.Namespace = namespace
-	badIndexRef := gcds.NameKey(tissuesds.IssueRefKind, "998", projectKey)
-	badIndexRef.Namespace = namespace
-	check("bad-index", badIndexIssue, badIndexRef, "wwwwwwwwwwwwwwwwwwwwwwwwww")
-	missingParentIssue := gcds.NameKey(tissuesds.IssueKind, "vvvvvvvvvvvvvvvvvvvvvvvvvv", projectKey)
+	badKeyIssue := gcds.NameKey(tissuesds.IssueKind, "not-a-ref", projectKey)
+	badKeyIssue.Namespace = namespace
+	check("bad-key", badKeyIssue)
+	keyMismatchIssue := gcds.NameKey(tissuesds.IssueKind, "FLUENT-999", projectKey)
+	keyMismatchIssue.Namespace = namespace
+	check("key-mismatch", keyMismatchIssue)
+	missingParentIssue := gcds.NameKey(tissuesds.IssueKind, "FLUENT-997", projectKey)
 	missingParentIssue.Namespace = namespace
-	missingParentRef := gcds.NameKey(tissuesds.IssueRefKind, "997", projectKey)
-	missingParentRef.Namespace = namespace
-	check("missing-parent", missingParentIssue, missingParentRef, missingParentIssue.Name)
-	badAncestryIssue := gcds.NameKey(tissuesds.IssueKind, "uuuuuuuuuuuuuuuuuuuuuuuuuu", nil)
+	check("missing-parent", missingParentIssue)
+	badAncestryIssue := gcds.NameKey(tissuesds.IssueKind, "FLUENT-996", nil)
 	badAncestryIssue.Namespace = namespace
-	check("bad-ancestry", badAncestryIssue, nil, "")
-	t.Log("global Issue overview rejects malformed ancestry, missing/mismatched indexes, and missing parents")
+	check("bad-ancestry", badAncestryIssue)
+	t.Log("global Issue overview rejects malformed canonical keys and ancestry, mismatched numbers, and missing parents")
 }
 
 func countIssues(issues []*tissues.Issue) int {
@@ -299,7 +317,7 @@ func countIssues(issues []*tissues.Issue) int {
 
 func cleanupNamespace(t *testing.T, ctx context.Context, client *gcds.Client, namespace string) {
 	t.Helper()
-	kinds := []string{tissuesds.CommentKind, tissuesds.IssueRefKind, tissuesds.IssueKind, tissuesds.ProjectKind}
+	kinds := []string{tissuesds.CommentKind, tissuesds.IssueKind, tissuesds.ProjectKind}
 	for _, kind := range kinds {
 		keys, err := client.GetAll(ctx, gcds.NewQuery(kind).Namespace(namespace).KeysOnly(), nil)
 		if err != nil {

@@ -19,7 +19,6 @@ type memoryRepository struct {
 	mu       sync.Mutex
 	projects map[string]*Project
 	issues   map[string]map[string]*Issue
-	refs     map[string]map[int64]string
 	comments map[string]map[string]map[string]*Comment
 }
 
@@ -80,7 +79,6 @@ func newMemoryRepository() *memoryRepository {
 	return &memoryRepository{
 		projects: map[string]*Project{},
 		issues:   map[string]map[string]*Issue{},
-		refs:     map[string]map[int64]string{},
 		comments: map[string]map[string]map[string]*Comment{},
 	}
 }
@@ -112,19 +110,16 @@ func (m *memoryRepository) ListIssueOverviewsPage(_ context.Context, request Pag
 		if request.ProjectKey != "" && projectKey != request.ProjectKey {
 			continue
 		}
-		for _, issue := range issues {
-			if m.refs[projectKey][issue.Number] != issue.ID {
+		for ref, issue := range issues {
+			if ref != issue.Ref || issue.Validate() != nil {
 				return nil, ErrInternal
 			}
-			parentRef := ""
-			if issue.ParentID != "" {
-				parent := issues[issue.ParentID]
-				if parent == nil || m.refs[projectKey][parent.Number] != parent.ID {
+			if issue.ParentRef != "" {
+				if issues[issue.ParentRef] == nil {
 					return nil, ErrInternal
 				}
-				parentRef = parent.Ref
 			}
-			out = append(out, &IssueOverview{ProjectKey: projectKey, Number: issue.Number, Ref: issue.Ref, Title: issue.Title, State: issue.State, ParentRef: parentRef, Updated: issue.Updated})
+			out = append(out, &IssueOverview{ProjectKey: projectKey, Number: issue.Number, Ref: issue.Ref, Title: issue.Title, State: issue.State, ParentRef: issue.ParentRef, Updated: issue.Updated})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -178,18 +173,17 @@ func (m *memoryRepository) ListIssues(_ context.Context, projectKey string) ([]*
 	}
 	return m.issueTree(projectKey)
 }
-func (m *memoryRepository) ResolveIssue(_ context.Context, ref IssueRef) (*Issue, error) {
+func (m *memoryRepository) GetIssue(_ context.Context, ref IssueRef) (*Issue, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	id := m.refs[ref.ProjectKey][ref.Number]
-	if id == "" {
+	if m.issues[ref.ProjectKey][ref.String()] == nil {
 		return nil, ErrNotFound
 	}
 	tree, err := m.issueTree(ref.ProjectKey)
 	if err != nil {
 		return nil, err
 	}
-	issue := findMemoryIssue(tree, id)
+	issue := findMemoryIssue(tree, ref.String())
 	if issue == nil {
 		return nil, ErrInternal
 	}
@@ -202,7 +196,7 @@ func (m *memoryRepository) RunInTransaction(ctx context.Context, fn func(Transac
 	if err := fn(memoryTx{repo: copy}); err != nil {
 		return err
 	}
-	m.projects, m.issues, m.refs, m.comments = copy.projects, copy.issues, copy.refs, copy.comments
+	m.projects, m.issues, m.comments = copy.projects, copy.issues, copy.comments
 	return nil
 }
 
@@ -223,63 +217,36 @@ func (t memoryTx) PutProject(_ context.Context, project *Project) error {
 	if t.repo.issues[project.Key] == nil {
 		t.repo.issues[project.Key] = map[string]*Issue{}
 	}
-	if t.repo.refs[project.Key] == nil {
-		t.repo.refs[project.Key] = map[int64]string{}
-	}
 	if t.repo.comments[project.Key] == nil {
 		t.repo.comments[project.Key] = map[string]map[string]*Comment{}
 	}
 	return nil
 }
-func (t memoryTx) GetIssue(_ context.Context, projectKey, id string) (*Issue, error) {
-	issue := t.repo.issues[projectKey][id]
+func (t memoryTx) GetIssue(_ context.Context, ref IssueRef) (*Issue, error) {
+	issue := t.repo.issues[ref.ProjectKey][ref.String()]
 	if issue == nil {
 		return nil, ErrNotFound
 	}
 	return cloneIssue(issue), nil
 }
-func (t memoryTx) ResolveIssue(ctx context.Context, ref IssueRef) (*Issue, error) {
-	id := t.repo.refs[ref.ProjectKey][ref.Number]
-	if id == "" {
-		return nil, ErrNotFound
-	}
-	issue, err := t.GetIssue(ctx, ref.ProjectKey, id)
-	if err != nil {
-		return nil, ErrInternal
-	}
-	if issue.Number != ref.Number {
-		return nil, ErrInternal
-	}
-	if issue.ParentID != "" {
-		parent, err := t.GetIssue(ctx, ref.ProjectKey, issue.ParentID)
-		if err != nil {
-			return nil, ErrInternal
-		}
-		issue.ParentRef = parent.Ref
-	}
-	return issue, nil
-}
-func (t memoryTx) PutIssueRef(_ context.Context, ref IssueRef, issueID string) error {
-	if t.repo.refs[ref.ProjectKey] == nil {
-		t.repo.refs[ref.ProjectKey] = map[int64]string{}
-	}
-	t.repo.refs[ref.ProjectKey][ref.Number] = issueID
-	return nil
-}
-func (t memoryTx) GetComment(_ context.Context, projectKey, issueID, id string) (*Comment, error) {
-	comment := t.repo.comments[projectKey][issueID][id]
+func (t memoryTx) GetComment(_ context.Context, ref IssueRef, id string) (*Comment, error) {
+	comment := t.repo.comments[ref.ProjectKey][ref.String()][id]
 	if comment == nil {
 		return nil, ErrNotFound
 	}
 	return cloneComment(comment), nil
 }
-func (t memoryTx) ListComments(_ context.Context, projectKey, issueID string) ([]*Comment, error) {
-	var out []*Comment
-	for _, comment := range t.repo.comments[projectKey][issueID] {
-		out = append(out, cloneComment(comment))
+func (t memoryTx) GetLastComment(_ context.Context, ref IssueRef) (*Comment, error) {
+	var latest *Comment
+	for _, comment := range t.repo.comments[ref.ProjectKey][ref.String()] {
+		if latest == nil || latest.Created.Before(comment.Created) || latest.Created.Equal(comment.Created) && latest.ID < comment.ID {
+			latest = comment
+		}
 	}
-	SortComments(out)
-	return out, nil
+	if latest == nil {
+		return nil, ErrNotFound
+	}
+	return cloneComment(latest), nil
 }
 func (t memoryTx) PutIssue(_ context.Context, issue *Issue) error {
 	if err := issue.Validate(); err != nil {
@@ -291,43 +258,41 @@ func (t memoryTx) PutIssue(_ context.Context, issue *Issue) error {
 	copy := cloneIssue(issue)
 	copy.Children = nil
 	copy.Comments = nil
-	copy.ParentRef = ""
-	t.repo.issues[issue.ProjectKey][issue.ID] = copy
+	t.repo.issues[issue.ProjectKey][issue.Ref] = copy
 	return nil
 }
-func (t memoryTx) PutComment(_ context.Context, projectKey, issueID string, comment *Comment) error {
+func (t memoryTx) PutComment(_ context.Context, ref IssueRef, comment *Comment) error {
 	if err := comment.Validate(); err != nil {
 		return err
 	}
-	if t.repo.comments[projectKey][issueID] == nil {
-		t.repo.comments[projectKey][issueID] = map[string]*Comment{}
+	if t.repo.comments[ref.ProjectKey][ref.String()] == nil {
+		t.repo.comments[ref.ProjectKey][ref.String()] = map[string]*Comment{}
 	}
-	t.repo.comments[projectKey][issueID][comment.ID] = cloneComment(comment)
+	t.repo.comments[ref.ProjectKey][ref.String()][comment.ID] = cloneComment(comment)
 	return nil
 }
 
 func (m *memoryRepository) issueTree(projectKey string) ([]*Issue, error) {
 	flat := map[string]*Issue{}
-	for id, issue := range m.issues[projectKey] {
-		flat[id] = cloneIssue(issue)
-		flat[id].Children = nil
-		flat[id].Comments = nil
-		for _, comment := range m.comments[projectKey][id] {
-			flat[id].Comments = append(flat[id].Comments, cloneComment(comment))
+	for ref, issue := range m.issues[projectKey] {
+		flat[ref] = cloneIssue(issue)
+		flat[ref].Children = nil
+		flat[ref].Comments = nil
+		for _, comment := range m.comments[projectKey][ref] {
+			flat[ref].Comments = append(flat[ref].Comments, cloneComment(comment))
 		}
-		SortComments(flat[id].Comments)
+		SortComments(flat[ref].Comments)
 	}
 	var roots []*Issue
 	for _, issue := range flat {
-		if issue.ParentID == "" {
+		if issue.ParentRef == "" {
 			roots = append(roots, issue)
 			continue
 		}
-		parent := flat[issue.ParentID]
+		parent := flat[issue.ParentRef]
 		if parent == nil {
 			return nil, ErrInternal
 		}
-		issue.ParentRef = parent.Ref
 		parent.Children = append(parent.Children, issue)
 	}
 	if hasMemoryCycle(flat) {
@@ -337,9 +302,9 @@ func (m *memoryRepository) issueTree(projectKey string) ([]*Issue, error) {
 	return roots, nil
 }
 func hasMemoryCycle(flat map[string]*Issue) bool {
-	for id := range flat {
+	for ref := range flat {
 		seen := map[string]bool{}
-		for current := id; current != ""; current = flat[current].ParentID {
+		for current := ref; current != ""; current = flat[current].ParentRef {
 			if flat[current] == nil || seen[current] {
 				return true
 			}
@@ -348,12 +313,12 @@ func hasMemoryCycle(flat map[string]*Issue) bool {
 	}
 	return false
 }
-func findMemoryIssue(issues []*Issue, id string) *Issue {
+func findMemoryIssue(issues []*Issue, ref string) *Issue {
 	for _, issue := range issues {
-		if issue.ID == id {
+		if issue.Ref == ref {
 			return issue
 		}
-		if found := findMemoryIssue(issue.Children, id); found != nil {
+		if found := findMemoryIssue(issue.Children, ref); found != nil {
 			return found
 		}
 	}
@@ -366,22 +331,16 @@ func (m *memoryRepository) copy() *memoryRepository {
 	}
 	for projectKey, issues := range m.issues {
 		out.issues[projectKey] = map[string]*Issue{}
-		for id, issue := range issues {
-			out.issues[projectKey][id] = cloneIssue(issue)
-		}
-	}
-	for projectKey, refs := range m.refs {
-		out.refs[projectKey] = map[int64]string{}
-		for number, id := range refs {
-			out.refs[projectKey][number] = id
+		for ref, issue := range issues {
+			out.issues[projectKey][ref] = cloneIssue(issue)
 		}
 	}
 	for projectKey, issueComments := range m.comments {
 		out.comments[projectKey] = map[string]map[string]*Comment{}
-		for issueID, comments := range issueComments {
-			out.comments[projectKey][issueID] = map[string]*Comment{}
+		for issueRef, comments := range issueComments {
+			out.comments[projectKey][issueRef] = map[string]*Comment{}
 			for id, comment := range comments {
-				out.comments[projectKey][issueID][id] = cloneComment(comment)
+				out.comments[projectKey][issueRef][id] = cloneComment(comment)
 			}
 		}
 	}

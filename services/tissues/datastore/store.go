@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -16,10 +15,9 @@ import (
 )
 
 const (
-	ProjectKind  = "tissues_project"
-	IssueKind    = "tissues_issue"
-	IssueRefKind = "tissues_issue_ref"
-	CommentKind  = "tissues_comment"
+	ProjectKind = "tissues_project"
+	IssueKind   = "tissues_issue"
+	CommentKind = "tissues_comment"
 )
 
 type Store struct {
@@ -48,10 +46,7 @@ type issueEntity struct {
 	Created     int64  `datastore:"Created"`
 	Updated     int64  `datastore:"Updated"`
 	Description string `datastore:"Description,noindex"`
-	ParentID    string `datastore:"ParentID"`
-}
-type issueRefEntity struct {
-	IssueID string `datastore:"IssueID"`
+	ParentRef   string `datastore:"ParentRef"`
 }
 type commentEntity struct {
 	Author  string `datastore:"Author"`
@@ -65,18 +60,13 @@ func (s *Store) projectKey(projectKey string) *gcds.Key {
 	key.Namespace = s.namespace
 	return key
 }
-func (s *Store) issueKey(projectKey, id string) *gcds.Key {
-	key := gcds.NameKey(IssueKind, id, s.projectKey(projectKey))
+func (s *Store) issueKey(ref tissues.IssueRef) *gcds.Key {
+	key := gcds.NameKey(IssueKind, ref.String(), s.projectKey(ref.ProjectKey))
 	key.Namespace = s.namespace
 	return key
 }
-func (s *Store) issueRefKey(ref tissues.IssueRef) *gcds.Key {
-	key := gcds.NameKey(IssueRefKind, strconv.FormatInt(ref.Number, 10), s.projectKey(ref.ProjectKey))
-	key.Namespace = s.namespace
-	return key
-}
-func (s *Store) commentKey(projectKey, issueID, id string) *gcds.Key {
-	key := gcds.NameKey(CommentKind, id, s.issueKey(projectKey, issueID))
+func (s *Store) commentKey(ref tissues.IssueRef, id string) *gcds.Key {
+	key := gcds.NameKey(CommentKind, id, s.issueKey(ref))
 	key.Namespace = s.namespace
 	return key
 }
@@ -174,7 +164,11 @@ func (s *Store) ListIssueOverviewsPage(ctx context.Context, request tissues.Page
 		if err != nil || projectKey != key.Parent.Name {
 			return nil, fmt.Errorf("%w: issue %q has invalid Project ancestry", tissues.ErrInternal, key.Name)
 		}
-		issue := decodeIssue(projectKey, key.Name, &entities[i])
+		ref, err := tissues.ParseIssueRef(key.Name)
+		if err != nil || ref.ProjectKey != projectKey {
+			return nil, fmt.Errorf("%w: issue %q has invalid canonical key", tissues.ErrInternal, key.Name)
+		}
+		issue := decodeIssue(ref, &entities[i])
 		if err := issue.Validate(); err != nil {
 			return nil, fmt.Errorf("%w: invalid stored issue %q: %v", tissues.ErrInternal, key.Name, err)
 		}
@@ -196,8 +190,9 @@ func (s *Store) ListIssueOverviewsPage(ctx context.Context, request tissues.Page
 	parentEntities := make([]issueEntity, 0, len(keys))
 	parentIndexes := make([]int, 0, len(keys))
 	for i, issue := range issuesOnPage {
-		if issue.ParentID != "" {
-			parentKeys = append(parentKeys, s.issueKey(issue.ProjectKey, issue.ParentID))
+		if issue.ParentRef != "" {
+			parentRef, _ := tissues.ParseIssueRef(issue.ParentRef)
+			parentKeys = append(parentKeys, s.issueKey(parentRef))
 			parentEntities = append(parentEntities, issueEntity{})
 			parentIndexes = append(parentIndexes, i)
 		}
@@ -208,31 +203,16 @@ func (s *Store) ListIssueOverviewsPage(ctx context.Context, request tissues.Page
 		}
 		for i, entity := range parentEntities {
 			pageIssue := issuesOnPage[parentIndexes[i]]
-			parent := decodeIssue(pageIssue.ProjectKey, parentKeys[i].Name, &entity)
+			parentRef, parseErr := tissues.ParseIssueRef(parentKeys[i].Name)
+			if parseErr != nil {
+				return nil, fmt.Errorf("%w: issue overview contains an invalid parent key", tissues.ErrInternal)
+			}
+			parent := decodeIssue(parentRef, &entity)
 			if err := parent.Validate(); err != nil {
 				return nil, fmt.Errorf("%w: issue overview contains an invalid parent", tissues.ErrInternal)
 			}
-			pageIssue.ParentRef = parent.Ref
-		}
-	}
-
-	validationIssues := append([]*tissues.Issue{}, issuesOnPage...)
-	for i, entity := range parentEntities {
-		projectKey := issuesOnPage[parentIndexes[i]].ProjectKey
-		validationIssues = append(validationIssues, decodeIssue(projectKey, parentKeys[i].Name, &entity))
-	}
-	refKeys := make([]*gcds.Key, len(validationIssues))
-	refEntities := make([]issueRefEntity, len(validationIssues))
-	for i, issue := range validationIssues {
-		refKeys[i] = s.issueRefKey(tissues.IssueRef{ProjectKey: issue.ProjectKey, Number: issue.Number})
-	}
-	if len(refKeys) > 0 {
-		if err := s.client.GetMulti(ctx, refKeys, refEntities); err != nil {
-			return nil, fmt.Errorf("%w: issue overview contains a missing reference index", tissues.ErrInternal)
-		}
-		for i, index := range refEntities {
-			if index.IssueID != validationIssues[i].ID {
-				return nil, fmt.Errorf("%w: issue overview reference index disagrees with target issue", tissues.ErrInternal)
+			if parent.Ref != pageIssue.ParentRef {
+				return nil, fmt.Errorf("%w: issue overview parent key disagrees with stored parent", tissues.ErrInternal)
 			}
 		}
 	}
@@ -272,40 +252,18 @@ func (s *Store) ListIssues(ctx context.Context, projectKey string) ([]*tissues.I
 		if !directChildOf(key, ProjectKind, projectKey) {
 			return nil, fmt.Errorf("%w: issue %q has malformed Project ancestry", tissues.ErrInternal, key.Name)
 		}
-		issue := decodeIssue(projectKey, key.Name, &issueEntities[i])
+		ref, parseErr := tissues.ParseIssueRef(key.Name)
+		if parseErr != nil || ref.ProjectKey != projectKey {
+			return nil, fmt.Errorf("%w: issue %q has invalid canonical key", tissues.ErrInternal, key.Name)
+		}
+		issue := decodeIssue(ref, &issueEntities[i])
 		if err := issue.Validate(); err != nil {
 			return nil, fmt.Errorf("%w: invalid stored issue %q: %v", tissues.ErrInternal, key.Name, err)
 		}
-		if flat[issue.ID] != nil || byNumber[issue.Number] != nil {
+		if flat[issue.Ref] != nil || byNumber[issue.Number] != nil {
 			return nil, fmt.Errorf("%w: duplicate issue identity or number in project %s", tissues.ErrInternal, projectKey)
 		}
-		flat[issue.ID], byNumber[issue.Number] = issue, issue
-	}
-
-	var refEntities []issueRefEntity
-	refKeys, err := s.client.GetAll(ctx, gcds.NewQuery(IssueRefKind).Namespace(s.namespace).Ancestor(ancestor), &refEntities)
-	if err != nil {
-		return nil, translate(err)
-	}
-	seenRefs := make(map[int64]bool, len(refKeys))
-	for i, key := range refKeys {
-		if !directChildOf(key, ProjectKind, projectKey) {
-			return nil, fmt.Errorf("%w: issue reference %q has malformed Project ancestry", tissues.ErrInternal, key.Name)
-		}
-		ref, parseErr := tissues.ParseIssueRef(projectKey + "-" + key.Name)
-		if parseErr != nil || seenRefs[ref.Number] {
-			return nil, fmt.Errorf("%w: malformed or duplicate issue reference index %q", tissues.ErrInternal, key.Name)
-		}
-		issue := flat[refEntities[i].IssueID]
-		if issue == nil || issue.Number != ref.Number {
-			return nil, fmt.Errorf("%w: issue reference %s points to missing or mismatched issue", tissues.ErrInternal, ref)
-		}
-		seenRefs[ref.Number] = true
-	}
-	for number := range byNumber {
-		if !seenRefs[number] {
-			return nil, fmt.Errorf("%w: issue %s-%d has no reference index", tissues.ErrInternal, projectKey, number)
-		}
+		flat[issue.Ref], byNumber[issue.Number] = issue, issue
 	}
 
 	var commentEntities []commentEntity
@@ -329,15 +287,14 @@ func (s *Store) ListIssues(ctx context.Context, projectKey string) ([]*tissues.I
 	}
 	var roots []*tissues.Issue
 	for _, issue := range flat {
-		if issue.ParentID == "" {
+		if issue.ParentRef == "" {
 			roots = append(roots, issue)
 			continue
 		}
-		parent := flat[issue.ParentID]
+		parent := flat[issue.ParentRef]
 		if parent == nil {
-			return nil, fmt.Errorf("%w: issue %q has missing parent %q inside project %s", tissues.ErrInternal, issue.ID, issue.ParentID, projectKey)
+			return nil, fmt.Errorf("%w: issue %q has missing parent %q inside project %s", tissues.ErrInternal, issue.Ref, issue.ParentRef, projectKey)
 		}
-		issue.ParentRef = parent.Ref
 		parent.Children = append(parent.Children, issue)
 	}
 	if err := validateAcyclic(flat); err != nil {
@@ -347,26 +304,20 @@ func (s *Store) ListIssues(ctx context.Context, projectKey string) ([]*tissues.I
 	return roots, nil
 }
 
-func (s *Store) ResolveIssue(ctx context.Context, ref tissues.IssueRef) (*tissues.Issue, error) {
-	var index issueRefEntity
-	if err := s.client.Get(ctx, s.issueRefKey(ref), &index); err != nil {
-		return nil, translate(err)
-	}
+func (s *Store) GetIssue(ctx context.Context, ref tissues.IssueRef) (*tissues.Issue, error) {
 	var entity issueEntity
-	if err := s.client.Get(ctx, s.issueKey(ref.ProjectKey, index.IssueID), &entity); err != nil {
-		if errors.Is(err, gcds.ErrNoSuchEntity) {
-			return nil, fmt.Errorf("%w: issue reference %s maps to a missing issue", tissues.ErrInternal, ref)
-		}
+	if err := s.client.Get(ctx, s.issueKey(ref), &entity); err != nil {
 		return nil, translate(err)
 	}
-	if point := decodeIssue(ref.ProjectKey, index.IssueID, &entity); point.Number != ref.Number {
-		return nil, fmt.Errorf("%w: issue reference %s disagrees with target issue", tissues.ErrInternal, ref)
+	point := decodeIssue(ref, &entity)
+	if err := point.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: invalid stored issue %s: %v", tissues.ErrInternal, ref, err)
 	}
 	roots, err := s.ListIssues(ctx, ref.ProjectKey)
 	if err != nil {
 		return nil, err
 	}
-	if issue := findIssue(roots, index.IssueID); issue != nil {
+	if issue := findIssue(roots, ref.String()); issue != nil {
 		return issue, nil
 	}
 	return nil, fmt.Errorf("%w: point-read issue %s missing from project view", tissues.ErrInternal, ref)
@@ -400,54 +351,20 @@ func (t *transaction) PutProject(_ context.Context, project *tissues.Project) er
 	_, err := t.tx.Put(t.store.projectKey(project.Key), encodeProject(project))
 	return translate(err)
 }
-func (t *transaction) GetIssue(_ context.Context, projectKey, id string) (*tissues.Issue, error) {
+func (t *transaction) GetIssue(_ context.Context, ref tissues.IssueRef) (*tissues.Issue, error) {
 	var entity issueEntity
-	if err := t.tx.Get(t.store.issueKey(projectKey, id), &entity); err != nil {
+	if err := t.tx.Get(t.store.issueKey(ref), &entity); err != nil {
 		return nil, translate(err)
 	}
-	issue := decodeIssue(projectKey, id, &entity)
+	issue := decodeIssue(ref, &entity)
 	if err := issue.Validate(); err != nil {
-		return nil, fmt.Errorf("%w: invalid stored issue %q: %v", tissues.ErrInternal, id, err)
+		return nil, fmt.Errorf("%w: invalid stored issue %q: %v", tissues.ErrInternal, ref, err)
 	}
 	return issue, nil
 }
-func (t *transaction) ResolveIssue(ctx context.Context, ref tissues.IssueRef) (*tissues.Issue, error) {
-	var index issueRefEntity
-	if err := t.tx.Get(t.store.issueRefKey(ref), &index); err != nil {
-		return nil, translate(err)
-	}
-	issue, err := t.GetIssue(ctx, ref.ProjectKey, index.IssueID)
-	if err != nil {
-		if errors.Is(err, tissues.ErrNotFound) {
-			return nil, fmt.Errorf("%w: issue reference %s maps to a missing issue", tissues.ErrInternal, ref)
-		}
-		return nil, err
-	}
-	if issue.Number != ref.Number {
-		return nil, fmt.Errorf("%w: issue reference %s disagrees with target issue", tissues.ErrInternal, ref)
-	}
-	if issue.ParentID != "" {
-		parent, err := t.GetIssue(ctx, ref.ProjectKey, issue.ParentID)
-		if err != nil {
-			if errors.Is(err, tissues.ErrNotFound) {
-				return nil, fmt.Errorf("%w: issue %s has a missing parent", tissues.ErrInternal, ref)
-			}
-			return nil, err
-		}
-		issue.ParentRef = parent.Ref
-	}
-	return issue, nil
-}
-func (t *transaction) PutIssueRef(_ context.Context, ref tissues.IssueRef, issueID string) error {
-	if err := ref.Validate(); err != nil || !tissues.ValidID(issueID) {
-		return fmt.Errorf("%w: invalid issue reference mapping", tissues.ErrInvalid)
-	}
-	_, err := t.tx.Put(t.store.issueRefKey(ref), &issueRefEntity{IssueID: issueID})
-	return translate(err)
-}
-func (t *transaction) GetComment(_ context.Context, projectKey, issueID, id string) (*tissues.Comment, error) {
+func (t *transaction) GetComment(_ context.Context, ref tissues.IssueRef, id string) (*tissues.Comment, error) {
 	var entity commentEntity
-	if err := t.tx.Get(t.store.commentKey(projectKey, issueID, id), &entity); err != nil {
+	if err := t.tx.Get(t.store.commentKey(ref, id), &entity); err != nil {
 		return nil, translate(err)
 	}
 	comment := decodeComment(id, &entity)
@@ -456,34 +373,38 @@ func (t *transaction) GetComment(_ context.Context, projectKey, issueID, id stri
 	}
 	return comment, nil
 }
-func (t *transaction) ListComments(ctx context.Context, projectKey, issueID string) ([]*tissues.Comment, error) {
+func (t *transaction) GetLastComment(ctx context.Context, ref tissues.IssueRef) (*tissues.Comment, error) {
 	var entities []commentEntity
-	keys, err := t.store.client.GetAll(ctx, gcds.NewQuery(CommentKind).Namespace(t.store.namespace).Ancestor(t.store.issueKey(projectKey, issueID)), &entities)
+	query := gcds.NewQuery(CommentKind).Namespace(t.store.namespace).Ancestor(t.store.issueKey(ref)).Order("-Created").Order("-__key__").Limit(1).Transaction(t.tx)
+	keys, err := t.store.client.GetAll(ctx, query, &entities)
 	if err != nil {
 		return nil, translate(err)
 	}
-	out := make([]*tissues.Comment, len(keys))
-	for i, key := range keys {
-		if key.Parent == nil || key.Parent.Name != issueID || !directChildOf(key.Parent, ProjectKind, projectKey) {
-			return nil, fmt.Errorf("%w: comment %q has malformed ancestry", tissues.ErrInternal, key.Name)
-		}
-		out[i] = decodeComment(key.Name, &entities[i])
+	if len(keys) == 0 {
+		return nil, tissues.ErrNotFound
 	}
-	tissues.SortComments(out)
-	return out, nil
+	if keys[0].Parent == nil || keys[0].Parent.Name != ref.String() || !directChildOf(keys[0].Parent, ProjectKind, ref.ProjectKey) {
+		return nil, fmt.Errorf("%w: comment %q has malformed ancestry", tissues.ErrInternal, keys[0].Name)
+	}
+	comment := decodeComment(keys[0].Name, &entities[0])
+	if err := comment.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: invalid stored comment %q: %v", tissues.ErrInternal, keys[0].Name, err)
+	}
+	return comment, nil
 }
 func (t *transaction) PutIssue(_ context.Context, issue *tissues.Issue) error {
 	if err := issue.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", tissues.ErrInvalid, err)
 	}
-	_, err := t.tx.Put(t.store.issueKey(issue.ProjectKey, issue.ID), encodeIssue(issue))
+	ref, _ := tissues.ParseIssueRef(issue.Ref)
+	_, err := t.tx.Put(t.store.issueKey(ref), encodeIssue(issue))
 	return translate(err)
 }
-func (t *transaction) PutComment(_ context.Context, projectKey, issueID string, comment *tissues.Comment) error {
+func (t *transaction) PutComment(_ context.Context, ref tissues.IssueRef, comment *tissues.Comment) error {
 	if err := comment.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", tissues.ErrInvalid, err)
 	}
-	_, err := t.tx.Put(t.store.commentKey(projectKey, issueID, comment.ID), encodeComment(comment))
+	_, err := t.tx.Put(t.store.commentKey(ref, comment.ID), encodeComment(comment))
 	return translate(err)
 }
 
@@ -494,11 +415,10 @@ func decodeProject(key string, e *projectEntity) *tissues.Project {
 	return &tissues.Project{Key: key, Created: time.Unix(0, e.Created).UTC(), NextIssueNumber: e.NextIssueNumber}
 }
 func encodeIssue(i *tissues.Issue) *issueEntity {
-	return &issueEntity{Number: i.Number, Title: i.Title, State: string(i.State), Created: i.Created.UnixNano(), Updated: i.Updated.UnixNano(), Description: i.Description, ParentID: i.ParentID}
+	return &issueEntity{Number: i.Number, Title: i.Title, State: string(i.State), Created: i.Created.UnixNano(), Updated: i.Updated.UnixNano(), Description: i.Description, ParentRef: i.ParentRef}
 }
-func decodeIssue(projectKey, id string, e *issueEntity) *tissues.Issue {
-	ref := tissues.IssueRef{ProjectKey: projectKey, Number: e.Number}
-	return &tissues.Issue{ID: id, ProjectKey: projectKey, Number: e.Number, Ref: ref.String(), Title: e.Title, State: tissues.State(e.State), Created: time.Unix(0, e.Created).UTC(), Updated: time.Unix(0, e.Updated).UTC(), Description: e.Description, ParentID: e.ParentID}
+func decodeIssue(ref tissues.IssueRef, e *issueEntity) *tissues.Issue {
+	return &tissues.Issue{ProjectKey: ref.ProjectKey, Number: e.Number, Ref: ref.String(), Title: e.Title, State: tissues.State(e.State), Created: time.Unix(0, e.Created).UTC(), Updated: time.Unix(0, e.Updated).UTC(), Description: e.Description, ParentRef: e.ParentRef}
 }
 func encodeComment(c *tissues.Comment) *commentEntity {
 	return &commentEntity{Author: c.Author, Created: c.Created.UnixNano(), Updated: c.Updated.UnixNano(), Body: c.Body}
@@ -528,9 +448,9 @@ func directChildOf(key *gcds.Key, parentKind, parentName string) bool {
 	return key != nil && key.Parent != nil && key.Parent.Kind == parentKind && key.Parent.Name == parentName && key.Parent.Parent == nil
 }
 func validateAcyclic(flat map[string]*tissues.Issue) error {
-	for id := range flat {
+	for ref := range flat {
 		seen := map[string]bool{}
-		for current := id; current != ""; {
+		for current := ref; current != ""; {
 			issue := flat[current]
 			if issue == nil {
 				return fmt.Errorf("%w: missing issue %q in hierarchy", tissues.ErrInternal, current)
@@ -539,7 +459,7 @@ func validateAcyclic(flat map[string]*tissues.Issue) error {
 				return fmt.Errorf("%w: stored hierarchy cycle at issue %q", tissues.ErrInternal, current)
 			}
 			seen[current] = true
-			current = issue.ParentID
+			current = issue.ParentRef
 		}
 	}
 	return nil
@@ -551,12 +471,12 @@ func sortIssueTree(issues []*tissues.Issue) {
 		tissues.SortComments(issue.Comments)
 	}
 }
-func findIssue(issues []*tissues.Issue, id string) *tissues.Issue {
+func findIssue(issues []*tissues.Issue, ref string) *tissues.Issue {
 	for _, issue := range issues {
-		if issue.ID == id {
+		if issue.Ref == ref {
 			return issue
 		}
-		if found := findIssue(issue.Children, id); found != nil {
+		if found := findIssue(issue.Children, ref); found != nil {
 			return found
 		}
 	}

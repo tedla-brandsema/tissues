@@ -83,11 +83,9 @@ single shared issue workspace.
 ## Tissues domain and Datastore
 
 Project is the only layer above the single Issue type. A canonical immutable
-Project key scopes a transactional `NextIssueNumber` allocator. Issues retain
-an opaque 26-character entity identity for internal persistence and expose a
-derived, stable human Issue ID such as `FLUENT-17`. Parentage is persisted as
-opaque `ParentID` relationship data inside one Project and exposed through the
-browser API as the derived parent issue ID; Issue-ID resolution and hierarchy
+Project key scopes a transactional `NextIssueNumber` allocator. Each Issue's
+canonical identity is its immutable `IssueRef`, such as `FLUENT-17`. Parentage
+is persisted directly as a canonical same-Project `ParentRef`; identity and hierarchy
 assertions occur in the same transaction as mutation.
 Comments belong to an Issue. Markdown is canonical rich text; trusted client
 HTML is not persisted.
@@ -101,12 +99,11 @@ after normalization to a 1200-pixel longest edge and 1 MiB maximum. Original
 bytes and source metadata are discarded. Assets are read through authenticated
 same-origin API routes rather than public or signed GCS URLs.
 
-Opaque Issue entity identities and Comment IDs are 16 random bytes encoded as
-lowercase, unpadded base32 (26 characters, no timestamp semantics). A
+Comment IDs are 16 random bytes encoded as lowercase, unpadded base32 (26
+characters, no timestamp semantics). A
 `tissues_project` named key is the immutable entity-group root. Its
-`tissues_issue` children retain opaque named identities, and the
-`tissues_issue_ref` Issue-ID index maps the decimal number to that opaque
-identity. `tissues_comment` entities descend from their Issue. Issue
+`tissues_issue` children use the canonical IssueRef as their named identity.
+`tissues_comment` entities descend from their Issue. Issue
 hierarchy is relationship data, never Datastore ancestry. Descriptions and
 bodies are unindexed; trees, parent issue IDs, and comments are derived and
 deterministically sorted in Go. Domain timestamps are stored as Unix-nanosecond
@@ -139,9 +136,8 @@ Overview tables use opaque Datastore cursors with Previous/Next history in the
 browser. Projects are ordered by canonical key. The global Issue overview is a
 lightweight cross-Project read model ordered by `Updated` descending. Its
 optional Project filter is an ancestor query, persists locally in the browser,
-and supplies the initial Project for Issue creation. The read model derives
-and validates human Issue IDs and parent issue IDs without exposing opaque Issue
-entity identities or loading recursive children/comments. Project-scoped Issue
+and supplies the initial Project for Issue creation. The read model validates
+canonical IssueRefs and ParentRefs without loading recursive children/comments. Project-scoped Issue
 trees remain the source for parent-Issue-ID suggestions.
 
 Issue create and PATCH payloads contain content only: title and canonical

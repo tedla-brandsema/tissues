@@ -277,7 +277,7 @@ func (s *Service) GetIssue(ctx context.Context, value string) (*Issue, error) {
 	if err != nil {
 		return nil, err
 	}
-	issue, err := s.repo.ResolveIssue(ctx, ref)
+	issue, err := s.repo.GetIssue(ctx, ref)
 	if err != nil {
 		return nil, persistenceError(err)
 	}
@@ -294,10 +294,6 @@ func (s *Service) CreateIssue(ctx context.Context, projectKey string, req Create
 	if err != nil {
 		return nil, err
 	}
-	id, err := s.newID()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInternal, err)
-	}
 	now := Timestamp(s.now())
 	var result *Issue
 	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
@@ -309,24 +305,16 @@ func (s *Service) CreateIssue(ctx context.Context, projectKey string, req Create
 			return fmt.Errorf("%w: project %s has invalid allocator state", ErrInternal, projectKey)
 		}
 		ref := IssueRef{ProjectKey: projectKey, Number: project.NextIssueNumber}
-		if _, getErr := tx.ResolveIssue(ctx, ref); getErr == nil {
+		if _, getErr := tx.GetIssue(ctx, ref); getErr == nil {
 			return fmt.Errorf("%w: issue reference %s already exists", ErrConflict, ref)
 		} else if !errors.Is(getErr, ErrNotFound) {
 			return getErr
 		}
-		if _, getErr := tx.GetIssue(ctx, projectKey, id); getErr == nil {
-			return fmt.Errorf("%w: issue ID %q already exists", ErrConflict, id)
-		} else if !errors.Is(getErr, ErrNotFound) {
-			return getErr
-		}
-		created := &Issue{ID: id, ProjectKey: projectKey, Number: ref.Number, Ref: ref.String(), Title: req.Title, State: StateOpen, Created: now, Updated: now, Description: req.Description}
+		created := &Issue{ProjectKey: projectKey, Number: ref.Number, Ref: ref.String(), Title: req.Title, State: StateOpen, Created: now, Updated: now, Description: req.Description}
 		if err := created.Validate(); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalid, err)
 		}
 		if err := tx.PutIssue(ctx, created); err != nil {
-			return err
-		}
-		if err := tx.PutIssueRef(ctx, ref, id); err != nil {
 			return err
 		}
 		project.NextIssueNumber++
@@ -355,7 +343,7 @@ func (s *Service) UpdateIssue(ctx context.Context, req UpdateIssueRequest) (*Iss
 	now := Timestamp(s.now())
 	var result *Issue
 	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
-		issue, err := tx.ResolveIssue(ctx, ref)
+		issue, err := tx.GetIssue(ctx, ref)
 		if err != nil {
 			return err
 		}
@@ -392,16 +380,16 @@ func (s *Service) MoveIssue(ctx context.Context, issueValue, parentValue string)
 	now := Timestamp(s.now())
 	var result *Issue
 	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
-		issue, err := tx.ResolveIssue(ctx, ref)
+		issue, err := tx.GetIssue(ctx, ref)
 		if err != nil {
 			return err
 		}
-		parentID, parentCanonical, err := resolveParent(ctx, tx, issue, parentValue)
+		parentCanonical, err := resolveParent(ctx, tx, issue, parentValue)
 		if err != nil {
 			return err
 		}
-		if issue.ParentID != parentID || issue.ParentRef != parentCanonical {
-			issue.ParentID, issue.ParentRef, issue.Updated = parentID, parentCanonical, now
+		if issue.ParentRef != parentCanonical {
+			issue.ParentRef, issue.Updated = parentCanonical, now
 			if err := issue.Validate(); err != nil {
 				return fmt.Errorf("%w: %v", ErrInvalid, err)
 			}
@@ -418,45 +406,53 @@ func (s *Service) MoveIssue(ctx context.Context, issueValue, parentValue string)
 	return result, nil
 }
 
-func resolveParent(ctx context.Context, tx Transaction, issue *Issue, parentValue string) (string, string, error) {
+func resolveParent(ctx context.Context, tx Transaction, issue *Issue, parentValue string) (string, error) {
 	if parentValue == "" {
-		return "", "", nil
+		return "", nil
 	}
 	parentRef, err := issueRefInput(parentValue)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	if parentRef.ProjectKey != issue.ProjectKey {
-		return "", "", fmt.Errorf("%w: parent reference must belong to project %s", ErrInvalid, issue.ProjectKey)
+		return "", fmt.Errorf("%w: parent reference must belong to project %s", ErrInvalid, issue.ProjectKey)
 	}
-	parent, err := tx.ResolveIssue(ctx, parentRef)
+	parent, err := tx.GetIssue(ctx, parentRef)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	if parent.ProjectKey != issue.ProjectKey {
-		return "", "", fmt.Errorf("%w: parent reference must belong to project %s", ErrInvalid, issue.ProjectKey)
+		return "", fmt.Errorf("%w: parent reference must belong to project %s", ErrInvalid, issue.ProjectKey)
 	}
-	if parent.ID == issue.ID {
-		return "", "", fmt.Errorf("%w: issue %s cannot be its own parent", ErrInvalid, issue.Ref)
+	if parent.Ref == issue.Ref {
+		return "", fmt.Errorf("%w: issue %s cannot be its own parent", ErrInvalid, issue.Ref)
 	}
 	visited := map[string]bool{}
 	for current := parent; current != nil; {
-		if current.ID == issue.ID {
-			return "", "", fmt.Errorf("%w: issue %s cannot be moved beneath descendant %s", ErrInvalid, issue.Ref, parent.Ref)
+		if current.Ref == issue.Ref {
+			return "", fmt.Errorf("%w: issue %s cannot be moved beneath descendant %s", ErrInvalid, issue.Ref, parent.Ref)
 		}
-		if visited[current.ID] {
-			return "", "", fmt.Errorf("%w: existing hierarchy cycle at issue %s", ErrInternal, current.Ref)
+		if visited[current.Ref] {
+			return "", fmt.Errorf("%w: existing hierarchy cycle at issue %s", ErrInternal, current.Ref)
 		}
-		visited[current.ID] = true
-		if current.ParentID == "" {
+		visited[current.Ref] = true
+		if current.ParentRef == "" {
 			break
 		}
-		current, err = tx.GetIssue(ctx, issue.ProjectKey, current.ParentID)
+		ancestorRef, parseErr := ParseIssueRef(current.ParentRef)
+		if parseErr != nil {
+			return "", fmt.Errorf("%w: invalid stored parent reference %q", ErrInternal, current.ParentRef)
+		}
+		childRef := current.Ref
+		current, err = tx.GetIssue(ctx, ancestorRef)
 		if err != nil {
-			return "", "", err
+			if errors.Is(err, ErrNotFound) {
+				return "", fmt.Errorf("%w: issue %s has missing parent %s", ErrInternal, childRef, ancestorRef)
+			}
+			return "", err
 		}
 	}
-	return parent.ID, parent.Ref, nil
+	return parent.Ref, nil
 }
 
 func (s *Service) CloseIssue(ctx context.Context, ref string) (*Issue, error) {
@@ -474,7 +470,7 @@ func (s *Service) setState(ctx context.Context, value string, state State) (*Iss
 	now := Timestamp(s.now())
 	var result *Issue
 	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
-		issue, err := tx.ResolveIssue(ctx, ref)
+		issue, err := tx.GetIssue(ctx, ref)
 		if err != nil {
 			return err
 		}
@@ -505,31 +501,33 @@ func (s *Service) AddComment(ctx context.Context, issueValue, author, body strin
 	wallTime := Timestamp(s.now())
 	var result *Comment
 	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
-		issue, err := tx.ResolveIssue(ctx, ref)
+		issue, err := tx.GetIssue(ctx, ref)
 		if err != nil {
 			return err
 		}
-		if _, getErr := tx.GetComment(ctx, issue.ProjectKey, issue.ID, id); getErr == nil {
+		if _, getErr := tx.GetComment(ctx, ref, id); getErr == nil {
 			return fmt.Errorf("%w: comment ID %q already exists", ErrConflict, id)
 		} else if !errors.Is(getErr, ErrNotFound) {
 			return getErr
 		}
-		comments, err := tx.ListComments(ctx, issue.ProjectKey, issue.ID)
-		if err != nil {
+		latest, err := tx.GetLastComment(ctx, ref)
+		if err != nil && !errors.Is(err, ErrNotFound) {
 			return err
 		}
-		SortComments(comments)
 		created := wallTime
-		if n := len(comments); n > 0 && !created.After(comments[n-1].Created) {
-			created = comments[n-1].Created.Add(time.Nanosecond)
+		if latest != nil && !created.After(latest.Created) {
+			created = latest.Created.Add(time.Nanosecond)
 		}
 		comment := &Comment{ID: id, Author: author, Created: created, Updated: created, Body: body}
 		if err := comment.Validate(); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalid, err)
 		}
-		if err := tx.PutComment(ctx, issue.ProjectKey, issue.ID, comment); err != nil {
+		if err := tx.PutComment(ctx, ref, comment); err != nil {
 			return err
 		}
+		// This unchanged logical Issue write is the per-Issue serialization
+		// fence contract. The future Native adapter will make it a real
+		// persistence mutation.
 		if err := tx.PutIssue(ctx, issue); err != nil {
 			return err
 		}
@@ -550,11 +548,11 @@ func (s *Service) EditComment(ctx context.Context, issueValue, commentID, body s
 	now := Timestamp(s.now())
 	var result *Comment
 	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
-		issue, err := tx.ResolveIssue(ctx, ref)
+		_, err := tx.GetIssue(ctx, ref)
 		if err != nil {
 			return err
 		}
-		comment, err := tx.GetComment(ctx, issue.ProjectKey, issue.ID, commentID)
+		comment, err := tx.GetComment(ctx, ref, commentID)
 		if err != nil {
 			return err
 		}
@@ -563,7 +561,7 @@ func (s *Service) EditComment(ctx context.Context, issueValue, commentID, body s
 			if err := comment.Validate(); err != nil {
 				return fmt.Errorf("%w: %v", ErrInvalid, err)
 			}
-			if err := tx.PutComment(ctx, issue.ProjectKey, issue.ID, comment); err != nil {
+			if err := tx.PutComment(ctx, ref, comment); err != nil {
 				return err
 			}
 		}
