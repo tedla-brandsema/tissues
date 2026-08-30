@@ -24,6 +24,21 @@ func TestInactiveAuthNeedsNoCredentials(t *testing.T) {
 	}
 }
 
+func TestNewRequiresExplicitCodeStore(t *testing.T) {
+	cfg := validConfig()
+	profile, err := coreconfig.NewServiceProfile("test", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot, err := coreconfig.NewSlot(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(slot, nil); err == nil || !strings.Contains(err.Error(), "CodeStore") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func validConfig() Config {
 	return Config{
 		Enabled: true, IssuerURL: "http://127.0.0.1:18080", MCPResourceURL: "http://127.0.0.1:18080/mcp",

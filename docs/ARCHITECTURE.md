@@ -70,6 +70,15 @@ does not mutate outer Server configuration.
 `services/auth` owns the auth contribution, broker composition, routes,
 behavior, and `services/auth/frontend`. Reusable broker infrastructure remains
 in `lib/auth/broker`, and reusable GCP auth adapters remain in `lib/gcp/auth`.
+The broker has an inactive Firestore Native authorization-code adapter rooted
+at `oauthAuthorizationCodes/{sha256(rawCode)}`. Authorization codes are global
+issuer state, not tenant data, and the raw bearer credential is never stored or
+used as a document ID. `expires_unix` remains the synchronous semantic-expiry
+authority; the matching Firestore timestamp `expires_at` exists only for
+eventual TTL cleanup. The future TTL policy is collection group
+`oauthAuthorizationCodes`, field `expires_at`, for cleanup only. Application
+composition continues to inject the Datastore CodeStore until the later
+named-database activation phase.
 `services/tissues` owns the tissues contribution, Project, Issue, and Comment domain,
 repository contract, same-origin JSON and browser routes,
 `services/tissues/frontend`, and its

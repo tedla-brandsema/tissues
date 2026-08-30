@@ -10,6 +10,7 @@ import (
 
 	gcds "cloud.google.com/go/datastore"
 	"cloud.google.com/go/storage"
+	"github.com/tedla-brandsema/tissues/lib/auth/broker"
 	coreconfig "github.com/tedla-brandsema/tissues/lib/core/config"
 	"github.com/tedla-brandsema/tissues/lib/server"
 	"github.com/tedla-brandsema/tissues/lib/service"
@@ -108,7 +109,8 @@ func compose(ctx context.Context, profile coreconfig.Profile[appConfig]) (*serve
 			return nil, nil, fmt.Errorf("create auth Datastore client: %w", clientErr)
 		}
 		closers = append(closers, client.Close)
-		authService, serviceErr = authservice.New(authSlot, client)
+		codeStore := broker.NewDatastoreCodeStore(client, profile.Config.Auth.DatastoreNS, profile.Config.Auth.DatastoreKind)
+		authService, serviceErr = authservice.New(authSlot, codeStore)
 		if serviceErr != nil {
 			closeOnError()
 			return nil, nil, serviceErr

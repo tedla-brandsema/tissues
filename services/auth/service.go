@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	gcds "cloud.google.com/go/datastore"
 	"github.com/tedla-brandsema/tissues/lib/auth/broker"
 	gcpauth "github.com/tedla-brandsema/tissues/lib/gcp/auth"
 	"github.com/tedla-brandsema/tissues/lib/service"
@@ -64,7 +63,7 @@ var _ service.Service = (*Service)(nil)
 //go:embed frontend/generated
 var frontendFiles embed.FS
 
-func New(profile service.Profile[Config], client *gcds.Client) (*Service, error) {
+func New(profile service.Profile[Config], codeStore broker.CodeStore) (*Service, error) {
 	if profile == nil {
 		return nil, fmt.Errorf("auth profile is required")
 	}
@@ -75,8 +74,8 @@ func New(profile service.Profile[Config], client *gcds.Client) (*Service, error)
 	if !cfg.Enabled {
 		return nil, fmt.Errorf("auth Service is inactive")
 	}
-	if client == nil {
-		return nil, fmt.Errorf("auth Datastore client is required")
+	if codeStore == nil {
+		return nil, fmt.Errorf("auth CodeStore is required")
 	}
 	clientMetadataURLs, err := parseClientMetadataURLs(cfg.ClientMetadataURLList)
 	if err != nil {
@@ -86,7 +85,7 @@ func New(profile service.Profile[Config], client *gcds.Client) (*Service, error)
 	if err != nil {
 		return nil, err
 	}
-	brokerService := broker.NewService(broker.ServiceConfig{SigningSecret: []byte(cfg.SigningSecret), Issuer: cfg.IssuerURL, Resource: cfg.MCPResourceURL, Scopes: supportedScopes, ScopeImplications: map[string][]string{ScopeWrite: {ScopeRead}}, Clients: map[string]broker.Client{cfg.ClientID: {ID: cfg.ClientID, Secret: cfg.ClientSecret, RedirectURIs: []string{cfg.ClientRedirectURI}, TokenEndpointAuthMethod: broker.TokenEndpointAuthMethodClientSecretPost}}, ClientResolver: clientResolver, Entitlements: parseEntitlements(cfg.Entitlements), CodeStore: broker.NewDatastoreCodeStore(client, cfg.DatastoreNS, cfg.DatastoreKind)})
+	brokerService := broker.NewService(broker.ServiceConfig{SigningSecret: []byte(cfg.SigningSecret), Issuer: cfg.IssuerURL, Resource: cfg.MCPResourceURL, Scopes: supportedScopes, ScopeImplications: map[string][]string{ScopeWrite: {ScopeRead}}, Clients: map[string]broker.Client{cfg.ClientID: {ID: cfg.ClientID, Secret: cfg.ClientSecret, RedirectURIs: []string{cfg.ClientRedirectURI}, TokenEndpointAuthMethod: broker.TokenEndpointAuthMethodClientSecretPost}}, ClientResolver: clientResolver, Entitlements: parseEntitlements(cfg.Entitlements), CodeStore: codeStore})
 	frontend, err := newFrontendHandler(frontendFiles, "/auth/login")
 	if err != nil {
 		return nil, err
