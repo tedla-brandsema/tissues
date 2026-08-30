@@ -3,6 +3,7 @@ package datastore
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"sort"
@@ -15,6 +16,7 @@ import (
 )
 
 const (
+	TenantKind  = "tissues_tenant"
 	ProjectKind = "tissues_project"
 	IssueKind   = "tissues_issue"
 	CommentKind = "tissues_comment"
@@ -25,6 +27,11 @@ type Store struct {
 	namespace string
 }
 
+type TenantStore struct {
+	root     *Store
+	tenantID tissues.TenantID
+}
+
 func New(client *gcds.Client, namespace string) (*Store, error) {
 	if client == nil {
 		return nil, fmt.Errorf("Datastore client is required")
@@ -33,6 +40,13 @@ func New(client *gcds.Client, namespace string) (*Store, error) {
 		return nil, fmt.Errorf("Datastore namespace is required")
 	}
 	return &Store{client: client, namespace: namespace}, nil
+}
+
+func (s *Store) ForTenant(id tissues.TenantID) (tissues.TenantRepository, error) {
+	if err := id.Validate(); err != nil {
+		return nil, err
+	}
+	return &TenantStore{root: s, tenantID: id}, nil
 }
 
 type projectEntity struct {
@@ -55,32 +69,37 @@ type commentEntity struct {
 	Body    string `datastore:"Body,noindex"`
 }
 
-func (s *Store) projectKey(projectKey string) *gcds.Key {
-	key := gcds.NameKey(ProjectKind, projectKey, nil)
-	key.Namespace = s.namespace
+func (s *TenantStore) tenantKey() *gcds.Key {
+	key := gcds.NameKey(TenantKind, s.tenantID.String(), nil)
+	key.Namespace = s.root.namespace
 	return key
 }
-func (s *Store) issueKey(ref tissues.IssueRef) *gcds.Key {
+func (s *TenantStore) projectKey(projectKey string) *gcds.Key {
+	key := gcds.NameKey(ProjectKind, projectKey, s.tenantKey())
+	key.Namespace = s.root.namespace
+	return key
+}
+func (s *TenantStore) issueKey(ref tissues.IssueRef) *gcds.Key {
 	key := gcds.NameKey(IssueKind, ref.String(), s.projectKey(ref.ProjectKey))
-	key.Namespace = s.namespace
+	key.Namespace = s.root.namespace
 	return key
 }
-func (s *Store) commentKey(ref tissues.IssueRef, id string) *gcds.Key {
+func (s *TenantStore) commentKey(ref tissues.IssueRef, id string) *gcds.Key {
 	key := gcds.NameKey(CommentKind, id, s.issueKey(ref))
-	key.Namespace = s.namespace
+	key.Namespace = s.root.namespace
 	return key
 }
 
-func (s *Store) ListProjectsPage(ctx context.Context, request tissues.PageRequest) (*tissues.ProjectPage, error) {
-	query := gcds.NewQuery(ProjectKind).Namespace(s.namespace).Order("__key__").Limit(request.Size + 1)
+func (s *TenantStore) ListProjectsPage(ctx context.Context, request tissues.PageRequest) (*tissues.ProjectPage, error) {
+	query := gcds.NewQuery(ProjectKind).Namespace(s.root.namespace).Ancestor(s.tenantKey()).Order("__key__").Limit(request.Size + 1)
 	if request.Cursor != "" {
-		cursor, err := gcds.DecodeCursor(request.Cursor)
+		cursor, err := decodeTenantCursor(s.tenantID, request.Cursor)
 		if err != nil {
 			return nil, fmt.Errorf("%w: invalid cursor", tissues.ErrInvalid)
 		}
 		query = query.Start(cursor)
 	}
-	iter := s.client.Run(ctx, query)
+	iter := s.root.client.Run(ctx, query)
 	projects := make([]*tissues.Project, 0, request.Size)
 	nextCursor := ""
 	for len(projects) < request.Size {
@@ -92,7 +111,7 @@ func (s *Store) ListProjectsPage(ctx context.Context, request tissues.PageReques
 		if err != nil {
 			return nil, translate(err)
 		}
-		if key.Parent != nil || key.Name == "" {
+		if key.Name == "" || !s.validProjectKey(key, key.Name) {
 			return nil, fmt.Errorf("%w: malformed Project key", tissues.ErrInternal)
 		}
 		project := decodeProject(key.Name, &entity)
@@ -107,26 +126,26 @@ func (s *Store) ListProjectsPage(ctx context.Context, request tissues.PageReques
 	}
 	var extra projectEntity
 	if _, err := iter.Next(&extra); err == nil {
-		nextCursor = cursor.String()
+		nextCursor = encodeTenantCursor(s.tenantID, cursor.String())
 	} else if !errors.Is(err, iterator.Done) {
 		return nil, translate(err)
 	}
 	return &tissues.ProjectPage{Projects: projects, NextCursor: nextCursor}, nil
 }
 
-func (s *Store) ListIssueOverviewsPage(ctx context.Context, request tissues.PageRequest) (*tissues.IssueOverviewPage, error) {
-	query := gcds.NewQuery(IssueKind).Namespace(s.namespace).Order("-Updated").Limit(request.Size + 1)
+func (s *TenantStore) ListIssueOverviewsPage(ctx context.Context, request tissues.PageRequest) (*tissues.IssueOverviewPage, error) {
+	query := gcds.NewQuery(IssueKind).Namespace(s.root.namespace).Ancestor(s.tenantKey()).Order("-Updated").Limit(request.Size + 1)
 	if request.ProjectKey != "" {
 		query = query.Ancestor(s.projectKey(request.ProjectKey))
 	}
 	if request.Cursor != "" {
-		cursor, err := gcds.DecodeCursor(request.Cursor)
+		cursor, err := decodeTenantCursor(s.tenantID, request.Cursor)
 		if err != nil {
 			return nil, fmt.Errorf("%w: invalid cursor", tissues.ErrInvalid)
 		}
 		query = query.Start(cursor)
 	}
-	iter := s.client.Run(ctx, query)
+	iter := s.root.client.Run(ctx, query)
 	keys := make([]*gcds.Key, 0, request.Size)
 	entities := make([]issueEntity, 0, request.Size)
 	nextCursor := ""
@@ -148,7 +167,7 @@ func (s *Store) ListIssueOverviewsPage(ctx context.Context, request tissues.Page
 		}
 		var extra issueEntity
 		if _, err := iter.Next(&extra); err == nil {
-			nextCursor = cursor.String()
+			nextCursor = encodeTenantCursor(s.tenantID, cursor.String())
 		} else if !errors.Is(err, iterator.Done) {
 			return nil, translate(err)
 		}
@@ -157,7 +176,7 @@ func (s *Store) ListIssueOverviewsPage(ctx context.Context, request tissues.Page
 	projectKeys := make([]*gcds.Key, len(keys))
 	projectEntities := make([]projectEntity, len(keys))
 	for i, key := range keys {
-		if key == nil || key.Name == "" || key.Parent == nil || key.Parent.Kind != ProjectKind || key.Parent.Name == "" || key.Parent.Parent != nil {
+		if key == nil || key.Name == "" || key.Parent == nil || !s.validIssueKey(key, key.Parent.Name) {
 			return nil, fmt.Errorf("%w: issue has malformed Project ancestry", tissues.ErrInternal)
 		}
 		projectKey, err := tissues.CanonicalProjectKey(key.Parent.Name)
@@ -176,7 +195,7 @@ func (s *Store) ListIssueOverviewsPage(ctx context.Context, request tissues.Page
 		projectKeys[i] = s.projectKey(projectKey)
 	}
 	if len(projectKeys) > 0 {
-		if err := s.client.GetMulti(ctx, projectKeys, projectEntities); err != nil {
+		if err := s.root.client.GetMulti(ctx, projectKeys, projectEntities); err != nil {
 			return nil, fmt.Errorf("%w: issue overview references a missing or invalid Project", tissues.ErrInternal)
 		}
 		for i := range projectEntities {
@@ -198,7 +217,7 @@ func (s *Store) ListIssueOverviewsPage(ctx context.Context, request tissues.Page
 		}
 	}
 	if len(parentKeys) > 0 {
-		if err := s.client.GetMulti(ctx, parentKeys, parentEntities); err != nil {
+		if err := s.root.client.GetMulti(ctx, parentKeys, parentEntities); err != nil {
 			return nil, fmt.Errorf("%w: issue overview contains a missing parent", tissues.ErrInternal)
 		}
 		for i, entity := range parentEntities {
@@ -224,9 +243,9 @@ func (s *Store) ListIssueOverviewsPage(ctx context.Context, request tissues.Page
 	return &tissues.IssueOverviewPage{Issues: overviews, NextCursor: nextCursor}, nil
 }
 
-func (s *Store) GetProject(ctx context.Context, projectKey string) (*tissues.Project, error) {
+func (s *TenantStore) GetProject(ctx context.Context, projectKey string) (*tissues.Project, error) {
 	var entity projectEntity
-	if err := s.client.Get(ctx, s.projectKey(projectKey), &entity); err != nil {
+	if err := s.root.client.Get(ctx, s.projectKey(projectKey), &entity); err != nil {
 		return nil, translate(err)
 	}
 	project := decodeProject(projectKey, &entity)
@@ -236,20 +255,20 @@ func (s *Store) GetProject(ctx context.Context, projectKey string) (*tissues.Pro
 	return project, nil
 }
 
-func (s *Store) ListIssues(ctx context.Context, projectKey string) ([]*tissues.Issue, error) {
+func (s *TenantStore) ListIssues(ctx context.Context, projectKey string) ([]*tissues.Issue, error) {
 	if _, err := s.GetProject(ctx, projectKey); err != nil {
 		return nil, err
 	}
 	ancestor := s.projectKey(projectKey)
 	var issueEntities []issueEntity
-	issueKeys, err := s.client.GetAll(ctx, gcds.NewQuery(IssueKind).Namespace(s.namespace).Ancestor(ancestor), &issueEntities)
+	issueKeys, err := s.root.client.GetAll(ctx, gcds.NewQuery(IssueKind).Namespace(s.root.namespace).Ancestor(ancestor), &issueEntities)
 	if err != nil {
 		return nil, translate(err)
 	}
 	flat := make(map[string]*tissues.Issue, len(issueKeys))
 	byNumber := make(map[int64]*tissues.Issue, len(issueKeys))
 	for i, key := range issueKeys {
-		if !directChildOf(key, ProjectKind, projectKey) {
+		if !s.validIssueKey(key, projectKey) {
 			return nil, fmt.Errorf("%w: issue %q has malformed Project ancestry", tissues.ErrInternal, key.Name)
 		}
 		ref, parseErr := tissues.ParseIssueRef(key.Name)
@@ -267,12 +286,12 @@ func (s *Store) ListIssues(ctx context.Context, projectKey string) ([]*tissues.I
 	}
 
 	var commentEntities []commentEntity
-	commentKeys, err := s.client.GetAll(ctx, gcds.NewQuery(CommentKind).Namespace(s.namespace).Ancestor(ancestor), &commentEntities)
+	commentKeys, err := s.root.client.GetAll(ctx, gcds.NewQuery(CommentKind).Namespace(s.root.namespace).Ancestor(ancestor), &commentEntities)
 	if err != nil {
 		return nil, translate(err)
 	}
 	for i, key := range commentKeys {
-		if key.Parent == nil || !directChildOf(key.Parent, ProjectKind, projectKey) {
+		if key.Parent == nil || !s.validIssueKey(key.Parent, projectKey) {
 			return nil, fmt.Errorf("%w: comment %q has malformed Issue ancestry", tissues.ErrInternal, key.Name)
 		}
 		issue := flat[key.Parent.Name]
@@ -304,9 +323,9 @@ func (s *Store) ListIssues(ctx context.Context, projectKey string) ([]*tissues.I
 	return roots, nil
 }
 
-func (s *Store) GetIssue(ctx context.Context, ref tissues.IssueRef) (*tissues.Issue, error) {
+func (s *TenantStore) GetIssue(ctx context.Context, ref tissues.IssueRef) (*tissues.Issue, error) {
 	var entity issueEntity
-	if err := s.client.Get(ctx, s.issueKey(ref), &entity); err != nil {
+	if err := s.root.client.Get(ctx, s.issueKey(ref), &entity); err != nil {
 		return nil, translate(err)
 	}
 	point := decodeIssue(ref, &entity)
@@ -323,13 +342,13 @@ func (s *Store) GetIssue(ctx context.Context, ref tissues.IssueRef) (*tissues.Is
 	return nil, fmt.Errorf("%w: point-read issue %s missing from project view", tissues.ErrInternal, ref)
 }
 
-func (s *Store) RunInTransaction(ctx context.Context, fn func(tissues.Transaction) error) error {
-	_, err := s.client.RunInTransaction(ctx, func(tx *gcds.Transaction) error { return fn(&transaction{store: s, tx: tx}) }, gcds.MaxAttempts(20))
+func (s *TenantStore) RunInTransaction(ctx context.Context, fn func(tissues.Transaction) error) error {
+	_, err := s.root.client.RunInTransaction(ctx, func(tx *gcds.Transaction) error { return fn(&transaction{store: s, tx: tx}) }, gcds.MaxAttempts(20))
 	return translate(err)
 }
 
 type transaction struct {
-	store *Store
+	store *TenantStore
 	tx    *gcds.Transaction
 }
 
@@ -375,15 +394,15 @@ func (t *transaction) GetComment(_ context.Context, ref tissues.IssueRef, id str
 }
 func (t *transaction) GetLastComment(ctx context.Context, ref tissues.IssueRef) (*tissues.Comment, error) {
 	var entities []commentEntity
-	query := gcds.NewQuery(CommentKind).Namespace(t.store.namespace).Ancestor(t.store.issueKey(ref)).Order("-Created").Order("-__key__").Limit(1).Transaction(t.tx)
-	keys, err := t.store.client.GetAll(ctx, query, &entities)
+	query := gcds.NewQuery(CommentKind).Namespace(t.store.root.namespace).Ancestor(t.store.issueKey(ref)).Order("-Created").Order("-__key__").Limit(1).Transaction(t.tx)
+	keys, err := t.store.root.client.GetAll(ctx, query, &entities)
 	if err != nil {
 		return nil, translate(err)
 	}
 	if len(keys) == 0 {
 		return nil, tissues.ErrNotFound
 	}
-	if keys[0].Parent == nil || keys[0].Parent.Name != ref.String() || !directChildOf(keys[0].Parent, ProjectKind, ref.ProjectKey) {
+	if keys[0].Parent == nil || keys[0].Parent.Name != ref.String() || !t.store.validIssueKey(keys[0].Parent, ref.ProjectKey) {
 		return nil, fmt.Errorf("%w: comment %q has malformed ancestry", tissues.ErrInternal, keys[0].Name)
 	}
 	comment := decodeComment(keys[0].Name, &entities[0])
@@ -444,8 +463,32 @@ func translate(err error) error {
 	}
 	return tissues.ErrInternal
 }
-func directChildOf(key *gcds.Key, parentKind, parentName string) bool {
-	return key != nil && key.Parent != nil && key.Parent.Kind == parentKind && key.Parent.Name == parentName && key.Parent.Parent == nil
+func (s *TenantStore) validProjectKey(key *gcds.Key, projectKey string) bool {
+	return key != nil && key.Kind == ProjectKind && key.Name == projectKey && key.Namespace == s.root.namespace && key.Parent != nil && key.Parent.Kind == TenantKind && key.Parent.Name == s.tenantID.String() && key.Parent.Namespace == s.root.namespace && key.Parent.Parent == nil
+}
+
+func (s *TenantStore) validIssueKey(key *gcds.Key, projectKey string) bool {
+	return key != nil && key.Kind == IssueKind && key.Namespace == s.root.namespace && key.Parent != nil && s.validProjectKey(key.Parent, projectKey)
+}
+
+func encodeTenantCursor(id tissues.TenantID, provider string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(id.String() + "\n" + provider))
+}
+
+func decodeTenantCursor(id tissues.TenantID, value string) (gcds.Cursor, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return gcds.Cursor{}, fmt.Errorf("%w: invalid cursor", tissues.ErrInvalid)
+	}
+	parts := strings.SplitN(string(decoded), "\n", 2)
+	if len(parts) != 2 || parts[0] != id.String() {
+		return gcds.Cursor{}, fmt.Errorf("%w: invalid cursor", tissues.ErrInvalid)
+	}
+	cursor, err := gcds.DecodeCursor(parts[1])
+	if err != nil {
+		return gcds.Cursor{}, fmt.Errorf("%w: invalid cursor", tissues.ErrInvalid)
+	}
+	return cursor, nil
 }
 func validateAcyclic(flat map[string]*tissues.Issue) error {
 	for ref := range flat {

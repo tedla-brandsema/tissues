@@ -32,6 +32,19 @@ func TestIDEntropyFailure(t *testing.T) {
 	}
 }
 
+func TestTenantIDValidation(t *testing.T) {
+	const valid = "7womw3jzkek74oggxj6f42xak4"
+	id, err := ParseTenantID(valid)
+	if err != nil || id.String() != valid || id.Validate() != nil {
+		t.Fatalf("ParseTenantID(%q) = %q, %v", valid, id, err)
+	}
+	for _, invalid := range []string{"", "default", "7WOMW3JZKEK74OGGXJ6F42XAK4", "7womw3jzkek74oggxj6f42xak1", valid + "a"} {
+		if _, err := ParseTenantID(invalid); !errors.Is(err, ErrInvalid) {
+			t.Errorf("ParseTenantID(%q) error = %v", invalid, err)
+		}
+	}
+}
+
 func TestCommentOrderingTiesBreakByID(t *testing.T) {
 	now := time.Now().UTC()
 	comments := []*Comment{{ID: "bbbbbbbbbbbbbbbbbbbbbbbbbb", Created: now}, {ID: "aaaaaaaaaaaaaaaaaaaaaaaaaa", Created: now}}

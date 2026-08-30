@@ -312,10 +312,11 @@ func TestMCPFiveReadToolsMapDomainDTOsAndPagination(t *testing.T) {
 	if _, err := svc.UpdateIssue(context.Background(), UpdateIssueRequest{Ref: child.Ref, Title: &updatedTitle}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := assets.Put(context.Background(), AssetKey{ProjectKey: "ALPHA", IssueNumber: issue.Number, Name: "z.png"}, AssetWrite{ContentType: "image/png", Width: 20, Height: 10, Data: []byte("z")}); err != nil {
+	tenantAssets := mustMemoryTenantAssets(t, assets)
+	if _, err := tenantAssets.Put(context.Background(), AssetKey{ProjectKey: "ALPHA", IssueNumber: issue.Number, Name: "z.png"}, AssetWrite{ContentType: "image/png", Width: 20, Height: 10, Data: []byte("z")}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := assets.Put(context.Background(), AssetKey{ProjectKey: "ALPHA", IssueNumber: issue.Number, Name: "a.jpg"}, AssetWrite{ContentType: "image/jpeg", Width: 4, Height: 3, Data: []byte("a")}); err != nil {
+	if _, err := tenantAssets.Put(context.Background(), AssetKey{ProjectKey: "ALPHA", IssueNumber: issue.Number, Name: "a.jpg"}, AssetWrite{ContentType: "image/jpeg", Width: 4, Height: 3, Data: []byte("a")}); err != nil {
 		t.Fatal(err)
 	}
 	mux := registerMCPTestRoutes(t, svc)
@@ -891,7 +892,7 @@ func TestMCPTokenInfoAdapterCopiesClaims(t *testing.T) {
 
 func newMCPTestService(t *testing.T, repo Repository, assets AssetStore, verifier func(context.Context, string) (MCPVerifiedToken, error)) *Service {
 	t.Helper()
-	profile, err := coreconfig.NewServiceProfile("test", Config{})
+	profile, err := coreconfig.NewServiceProfile("test", Config{BootstrapTenantID: testTenantID.String()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1007,19 +1008,52 @@ type transactionCountingRepository struct {
 	transactions int
 }
 
-func (r *transactionCountingRepository) RunInTransaction(ctx context.Context, fn func(Transaction) error) error {
-	r.transactions++
-	return r.memoryRepository.RunInTransaction(ctx, fn)
+func (r *transactionCountingRepository) ForTenant(id TenantID) (TenantRepository, error) {
+	bound, err := r.memoryRepository.ForTenant(id)
+	if err != nil {
+		return nil, err
+	}
+	return transactionCountingTenantRepository{TenantRepository: bound, owner: r}, nil
 }
 
-func (r *actorRepository) GetProject(ctx context.Context, key string) (*Project, error) {
-	r.called = true
-	r.subject, _ = gcpauth.SubjectFromContext(ctx)
-	r.email, _ = gcpauth.EmailFromContext(ctx)
-	return r.memoryRepository.GetProject(ctx, key)
+type transactionCountingTenantRepository struct {
+	TenantRepository
+	owner *transactionCountingRepository
+}
+
+func (r transactionCountingTenantRepository) RunInTransaction(ctx context.Context, fn func(Transaction) error) error {
+	r.owner.transactions++
+	return r.TenantRepository.RunInTransaction(ctx, fn)
+}
+
+func (r *actorRepository) ForTenant(id TenantID) (TenantRepository, error) {
+	bound, err := r.memoryRepository.ForTenant(id)
+	if err != nil {
+		return nil, err
+	}
+	return actorTenantRepository{TenantRepository: bound, owner: r}, nil
+}
+
+type actorTenantRepository struct {
+	TenantRepository
+	owner *actorRepository
+}
+
+func (r actorTenantRepository) GetProject(ctx context.Context, key string) (*Project, error) {
+	r.owner.called = true
+	r.owner.subject, _ = gcpauth.SubjectFromContext(ctx)
+	r.owner.email, _ = gcpauth.EmailFromContext(ctx)
+	return r.TenantRepository.GetProject(ctx, key)
 }
 
 type failingRepository struct{ err error }
+
+func (r failingRepository) ForTenant(id TenantID) (TenantRepository, error) {
+	if err := id.Validate(); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
 
 func (r failingRepository) ListProjectsPage(context.Context, PageRequest) (*ProjectPage, error) {
 	return nil, r.err
@@ -1039,8 +1073,21 @@ type cancellationRepository struct {
 	started chan struct{}
 }
 
-func (r *cancellationRepository) ListProjectsPage(ctx context.Context, _ PageRequest) (*ProjectPage, error) {
-	close(r.started)
+func (r *cancellationRepository) ForTenant(id TenantID) (TenantRepository, error) {
+	bound, err := r.memoryRepository.ForTenant(id)
+	if err != nil {
+		return nil, err
+	}
+	return cancellationTenantRepository{TenantRepository: bound, owner: r}, nil
+}
+
+type cancellationTenantRepository struct {
+	TenantRepository
+	owner *cancellationRepository
+}
+
+func (r cancellationTenantRepository) ListProjectsPage(ctx context.Context, _ PageRequest) (*ProjectPage, error) {
+	close(r.owner.started)
 	<-ctx.Done()
 	return nil, ctx.Err()
 }

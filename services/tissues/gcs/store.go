@@ -20,6 +20,11 @@ type Store struct {
 	beforeWrite func()
 }
 
+type TenantStore struct {
+	root     *Store
+	tenantID tissues.TenantID
+}
+
 func New(client *storage.Client, bucket string) (*Store, error) {
 	if client == nil {
 		return nil, fmt.Errorf("GCS client is required")
@@ -30,29 +35,42 @@ func New(client *storage.Client, bucket string) (*Store, error) {
 	return &Store{bucket: client.Bucket(bucket)}, nil
 }
 
-func ObjectName(key tissues.AssetKey) (string, error) {
+func (s *Store) ForTenant(id tissues.TenantID) (tissues.TenantAssetStore, error) {
+	if err := id.Validate(); err != nil {
+		return nil, err
+	}
+	return &TenantStore{root: s, tenantID: id}, nil
+}
+
+func ObjectName(tenantID tissues.TenantID, key tissues.AssetKey) (string, error) {
+	if err := tenantID.Validate(); err != nil {
+		return "", err
+	}
 	if err := key.Validate(); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("issues/%s/%d/%s", key.ProjectKey, key.IssueNumber, key.Name), nil
+	return fmt.Sprintf("tenants/%s/issues/%s/%d/%s", tenantID, key.ProjectKey, key.IssueNumber, key.Name), nil
 }
 
-func issuePrefix(ref tissues.IssueRef) (string, error) {
+func issuePrefix(tenantID tissues.TenantID, ref tissues.IssueRef) (string, error) {
+	if err := tenantID.Validate(); err != nil {
+		return "", err
+	}
 	if err := ref.Validate(); err != nil {
 		return "", fmt.Errorf("%w: invalid asset Issue", tissues.ErrInvalid)
 	}
-	return fmt.Sprintf("issues/%s/%d/", ref.ProjectKey, ref.Number), nil
+	return fmt.Sprintf("tenants/%s/issues/%s/%d/", tenantID, ref.ProjectKey, ref.Number), nil
 }
 
-func (s *Store) Put(ctx context.Context, key tissues.AssetKey, write tissues.AssetWrite) (*tissues.Asset, error) {
-	name, err := ObjectName(key)
+func (s *TenantStore) Put(ctx context.Context, key tissues.AssetKey, write tissues.AssetWrite) (*tissues.Asset, error) {
+	name, err := ObjectName(s.tenantID, key)
 	if err != nil {
 		return nil, err
 	}
 	if err := validateWrite(write); err != nil {
 		return nil, err
 	}
-	object := s.bucket.Object(name)
+	object := s.root.bucket.Object(name)
 	condition := storage.Conditions{}
 	attrs, err := object.Attrs(ctx)
 	switch {
@@ -63,8 +81,8 @@ func (s *Store) Put(ctx context.Context, key tissues.AssetKey, write tissues.Ass
 	default:
 		condition.GenerationMatch = attrs.Generation
 	}
-	if s.beforeWrite != nil {
-		s.beforeWrite()
+	if s.root.beforeWrite != nil {
+		s.root.beforeWrite()
 	}
 
 	w := object.If(condition).NewWriter(ctx)
@@ -93,12 +111,12 @@ func validateWrite(write tissues.AssetWrite) error {
 	return nil
 }
 
-func (s *Store) Open(ctx context.Context, key tissues.AssetKey) (*tissues.AssetContent, error) {
-	name, err := ObjectName(key)
+func (s *TenantStore) Open(ctx context.Context, key tissues.AssetKey) (*tissues.AssetContent, error) {
+	name, err := ObjectName(s.tenantID, key)
 	if err != nil {
 		return nil, err
 	}
-	object := s.bucket.Object(name)
+	object := s.root.bucket.Object(name)
 	attrs, err := object.Attrs(ctx)
 	if err != nil {
 		return nil, translateError(err)
@@ -114,13 +132,13 @@ func (s *Store) Open(ctx context.Context, key tissues.AssetKey) (*tissues.AssetC
 	return &tissues.AssetContent{Asset: *asset, Body: r}, nil
 }
 
-func (s *Store) List(ctx context.Context, ref tissues.IssueRef) ([]*tissues.Asset, error) {
-	prefix, err := issuePrefix(ref)
+func (s *TenantStore) List(ctx context.Context, ref tissues.IssueRef) ([]*tissues.Asset, error) {
+	prefix, err := issuePrefix(s.tenantID, ref)
 	if err != nil {
 		return nil, err
 	}
 	var assets []*tissues.Asset
-	it := s.bucket.Objects(ctx, &storage.Query{Prefix: prefix})
+	it := s.root.bucket.Objects(ctx, &storage.Query{Prefix: prefix})
 	for {
 		attrs, err := it.Next()
 		if errors.Is(err, iterator.Done) {

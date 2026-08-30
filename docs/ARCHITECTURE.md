@@ -77,8 +77,14 @@ schema-specific Cloud Datastore adapter under `services/tissues/datastore`.
 Each relying Service controls authentication enforcement independently. When
 tissues enforcement is enabled, signed local state preserves the exact safe
 original request URI through broker login and callback; unsafe external targets
-remain rejected. Authentication identifies an actor but does not partition the
-single shared issue workspace.
+remain rejected. Authentication identifies an actor. During the bootstrap
+transition every operation resolves to one restart-required configured Tissues
+TenantID. The Service retains root Repository and AssetStore boundaries,
+resolves the TenantID from the operation context exactly once, and binds the
+required roots with that same ID. The current resolver ignores actor context;
+later principal-aware selection will replace only that decision. Tenant
+identity is never inferred from email, subject, OAuth client, host, or
+Datastore namespace.
 
 ## Tissues domain and Datastore
 
@@ -90,18 +96,29 @@ assertions occur in the same transaction as mutation.
 Comments belong to an Issue. Markdown is canonical rich text; trusted client
 HTML is not persisted.
 
-Existing Issues may also own JPEG and PNG assets through the Service-owned
-`AssetStore` boundary. The GCS adapter inventories deterministic
-`issues/{PROJECT}/{NUMBER}/{filename}` objects in separate private production
+Existing Issues may also own JPEG and PNG assets through a root `AssetStore`
+that must be bound with `ForTenant` before it exposes `Put`, `Open`, or `List`.
+The GCS adapter inventories deterministic
+`tenants/{tenantID}/issues/{PROJECT}/{NUMBER}/{filename}` objects in separate private production
 and dogfood buckets; no Datastore Asset entity is introduced. Upload input is
 bounded to 6 MiB, decoded and freshly encoded as pixels, and persisted only
 after normalization to a 1200-pixel longest edge and 1 MiB maximum. Original
 bytes and source metadata are discarded. Assets are read through authenticated
 same-origin API routes rather than public or signed GCS URLs.
 
-Comment IDs are 16 random bytes encoded as lowercase, unpadded base32 (26
-characters, no timestamp semantics). A
-`tissues_project` named key is the immutable entity-group root. Its
+TenantID and Comment IDs are 16 random bytes encoded as lowercase, unpadded
+base32 (26 characters, no timestamp semantics). TenantID is Tissues-owned,
+stable across processes, and selected from typed configuration rather than
+generated at startup. A Service does not belong permanently to one tenant: it
+retains the root Repository and AssetStore, resolves the authoritative TenantID
+for each operation, and binds the roots through `ForTenant`. Ordinary domain
+and asset operations exist only on the returned tenant stores. Asset operations
+resolve once and use that exact ID for both Issue lookup and object access.
+
+Within the existing environment namespace, a non-persisted
+`tissues_tenant/{tenantID}` ancestor scopes every domain query and key. The
+namespace is transitional storage configuration, not tenancy. A
+`tissues_project` named key beneath that ancestor owns its allocator. Its
 `tissues_issue` children use the canonical IssueRef as their named identity.
 `tissues_comment` entities descend from their Issue. Issue
 hierarchy is relationship data, never Datastore ancestry. Descriptions and
@@ -109,6 +126,21 @@ bodies are unindexed; trees, parent issue IDs, and comments are derived and
 deterministically sorted in Go. Domain timestamps are stored as Unix-nanosecond
 integers so Datastore's native timestamp precision cannot erase the required
 one-nanosecond comment ordering.
+
+This transitional ancestry puts every Project below the same tenant root key,
+so a tenant's descendants share entity-group ancestry. That enables strongly
+consistent tenant ancestor queries, but under Datastore's
+`OPTIMISTIC_WITH_ENTITY_GROUPS` concurrency mode it also makes tenant-wide
+writes share the legacy entity-group contention boundary and one-write-per-
+second limit. Other Datastore concurrency modes use their documented
+overlapping-data transaction contention behavior instead. This transitional
+adapter is not the next persistence epoch; F3 replaces it with Firestore
+Native before activation.
+
+IssueRefs intentionally remain tenant-local human identities: two tenants may
+both contain `FLUENT-17`, with the bound repository determining which entity is
+addressed. Provider cursors are wrapped with their TenantID so replay against a
+different bound tenant is rejected before query execution.
 
 Service-specific frontends live with their Service. `lib/frontend` owns only
 reusable shadcn-derived primitives, Tailwind theme/base styles, and generic

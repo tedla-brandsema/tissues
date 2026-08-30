@@ -11,9 +11,14 @@ import (
 )
 
 func TestProjectIssueCommentKeyAncestry(t *testing.T) {
-	s := &Store{namespace: "example"}
+	tenantID := tissues.TenantID("7womw3jzkek74oggxj6f42xak4")
+	s := &TenantStore{root: &Store{namespace: "example"}, tenantID: tenantID}
+	tenant := s.tenantKey()
+	if tenant.Kind != TenantKind || tenant.Name != tenantID.String() || tenant.Parent != nil || tenant.Namespace != "example" {
+		t.Fatalf("tenant = %#v", tenant)
+	}
 	project := s.projectKey("FLUENT")
-	if project.Kind != ProjectKind || project.Name != "FLUENT" || project.Parent != nil || project.Namespace != "example" {
+	if project.Kind != ProjectKind || project.Name != "FLUENT" || project.Parent == nil || project.Parent.Name != tenantID.String() || project.Parent.Kind != TenantKind || project.Namespace != "example" {
 		t.Fatalf("project = %#v", project)
 	}
 	ref := tissues.IssueRef{ProjectKey: "FLUENT", Number: 17}
@@ -24,6 +29,15 @@ func TestProjectIssueCommentKeyAncestry(t *testing.T) {
 	comment := s.commentKey(ref, "bbbbbbbbbbbbbbbbbbbbbbbbbb")
 	if comment.Kind != CommentKind || comment.Parent == nil || comment.Parent.Name != issue.Name || comment.Parent.Parent == nil || comment.Parent.Parent.Name != "FLUENT" {
 		t.Fatalf("comment = %#v", comment)
+	}
+	otherTenant := gcds.NameKey(TenantKind, "aaaaaaaaaaaaaaaaaaaaaaaaaa", nil)
+	otherTenant.Namespace = "example"
+	wrongProject := gcds.NameKey(ProjectKind, "FLUENT", otherTenant)
+	wrongProject.Namespace = "example"
+	wrongIssue := gcds.NameKey(IssueKind, "FLUENT-17", wrongProject)
+	wrongIssue.Namespace = "example"
+	if s.validProjectKey(wrongProject, "FLUENT") || s.validIssueKey(wrongIssue, "FLUENT") {
+		t.Fatal("wrong-tenant ancestry accepted")
 	}
 }
 
@@ -70,13 +84,32 @@ func TestErrorTranslation(t *testing.T) {
 }
 
 func TestPagedQueriesRejectInvalidDatastoreCursors(t *testing.T) {
-	store := &Store{namespace: "example"}
+	root := &Store{namespace: "example"}
+	bound, err := root.ForTenant("7womw3jzkek74oggxj6f42xak4")
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := tissues.PageRequest{Size: 25, Cursor: "%"}
-	if _, err := store.ListProjectsPage(context.Background(), request); !errors.Is(err, tissues.ErrInvalid) {
+	if _, err := bound.ListProjectsPage(context.Background(), request); !errors.Is(err, tissues.ErrInvalid) {
 		t.Fatalf("Project cursor = %v", err)
 	}
-	if _, err := store.ListIssueOverviewsPage(context.Background(), request); !errors.Is(err, tissues.ErrInvalid) {
+	if _, err := bound.ListIssueOverviewsPage(context.Background(), request); !errors.Is(err, tissues.ErrInvalid) {
 		t.Fatalf("Issue cursor = %v", err)
+	}
+}
+
+func TestCursorBindingRejectsAnotherTenant(t *testing.T) {
+	tenantA := tissues.TenantID("7womw3jzkek74oggxj6f42xak4")
+	tenantB := tissues.TenantID("aaaaaaaaaaaaaaaaaaaaaaaaaa")
+	cursor := encodeTenantCursor(tenantA, "provider-position")
+	if _, err := decodeTenantCursor(tenantB, cursor); !errors.Is(err, tissues.ErrInvalid) {
+		t.Fatalf("cross-tenant cursor error = %v", err)
+	}
+}
+
+func TestForTenantRejectsInvalidID(t *testing.T) {
+	if _, err := (&Store{}).ForTenant("default"); !errors.Is(err, tissues.ErrInvalid) {
+		t.Fatalf("ForTenant error = %v", err)
 	}
 }
 

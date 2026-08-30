@@ -35,16 +35,22 @@ func TestGCSAssetStoreIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	store, err := New(client, bucket)
+	root, err := New(client, bucket)
 	if err != nil {
 		t.Fatal(err)
 	}
+	tenantID := tissues.TenantID("7womw3jzkek74oggxj6f42xak4")
+	bound, err := root.ForTenant(tenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := bound.(*TenantStore)
 	project := fmt.Sprintf("IT%X", time.Now().UnixNano())
 	if len(project) > 16 {
 		project = project[:16]
 	}
 	ref := tissues.IssueRef{ProjectKey: project, Number: 1}
-	prefix, err := issuePrefix(ref)
+	prefix, err := issuePrefix(tenantID, ref)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,11 +118,11 @@ func TestGCSAssetStoreIntegration(t *testing.T) {
 	}
 }
 
-func assertPutRace(t *testing.T, ctx context.Context, store *Store, key tissues.AssetKey) {
+func assertPutRace(t *testing.T, ctx context.Context, store *TenantStore, key tissues.AssetKey) {
 	t.Helper()
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
-	store.beforeWrite = func() { entered <- struct{}{}; <-release }
+	store.root.beforeWrite = func() { entered <- struct{}{}; <-release }
 	results := make(chan error, 2)
 	var wg sync.WaitGroup
 	for _, value := range []string{"race-one", "race-two"} {
@@ -146,7 +152,7 @@ func assertPutRace(t *testing.T, ctx context.Context, store *Store, key tissues.
 	if successes != 1 || conflicts != 1 {
 		t.Fatalf("race successes=%d conflicts=%d", successes, conflicts)
 	}
-	store.beforeWrite = nil
+	store.root.beforeWrite = nil
 }
 
 func integrationPNG(t *testing.T, width, height int, fill color.NRGBA) []byte {

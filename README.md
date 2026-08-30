@@ -99,6 +99,13 @@ API is namespaced beneath `/api/tissues/v1`.
 
 The tissues Service uses Cloud Datastore through ADC. Its typed storage config
 requires an explicit project ID and defaults its namespace to `tissues`.
+Each operation currently resolves to the configured bootstrap TenantID
+`7womw3jzkek74oggxj6f42xak4`; this stable, non-secret Tissues identity is
+configured identically for local dogfood and deployment. One Service retains
+the root stores and binds them after that per-operation decision, so a future
+request-derived resolver can serve multiple tenants without changing protocol
+or persistence contracts. The Datastore
+namespace selects an environment/storage partition and is not a tenant.
 Authentication enforcement remains independently optional and preserves exact
 safe local return URLs. Secrets are tagged and redacted from configuration
 diagnostics.
@@ -114,9 +121,9 @@ use separate private buckets.
 The shared installation contains Projects keyed by immutable uppercase prefixes
 such as `FLUENT`. The product presents that key as the Project ID. Each Project
 transactionally allocates immutable Issue numbers, producing a stable,
-human-facing Issue ID such as `FLUENT-17`. A separate opaque 26-character
-entity identity remains internal to persistence and is not exposed by the
-browser API.
+human-facing Issue ID such as `FLUENT-17`. No separate opaque Issue identity
+exists: the IssueRef is canonical within its bound tenant and is the identity
+exposed by the browser API.
 
 The browser has two navigation areas: Projects and Issues. Each opens a
 cursor-paged table in the main work area; creation and editing use dedicated

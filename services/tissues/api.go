@@ -114,7 +114,7 @@ func (s *Service) apiHandler() http.Handler {
 }
 
 func (s *Service) uploadAssetHTTP(w http.ResponseWriter, r *http.Request) {
-	issue, err := s.GetIssue(r.Context(), r.PathValue("id"))
+	issue, assets, err := s.assetStoresForIssue(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeServiceError(w, r, err)
 		return
@@ -142,7 +142,7 @@ func (s *Service) uploadAssetHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	asset, err := s.putProcessedAsset(r.Context(), issue, processed)
+	asset, err := putProcessedAsset(r.Context(), assets, issue, processed)
 	if err != nil {
 		writeServiceError(w, r, err)
 		return

@@ -14,16 +14,17 @@ import (
 // Service owns tissues domain behavior and HTTP routes. It does not own a
 // listener, PORT, process signals, or deployment lifecycle.
 type Service struct {
-	profile    service.Profile[Config]
-	repo       Repository
-	assets     AssetStore
-	httpClient *http.Client
-	now        func() time.Time
-	newID      IDGenerator
-	imageSlots chan struct{}
-	process    imageProcessor
-	mcpAuth    *MCPAuth
-	mcp        *mcpRoutes
+	profile       service.Profile[Config]
+	repo          Repository
+	assets        AssetStore
+	resolveTenant func(context.Context) (TenantID, error)
+	httpClient    *http.Client
+	now           func() time.Time
+	newID         IDGenerator
+	imageSlots    chan struct{}
+	process       imageProcessor
+	mcpAuth       *MCPAuth
+	mcp           *mcpRoutes
 }
 
 var _ service.Service = (*Service)(nil)
@@ -52,7 +53,22 @@ func New(profile service.Profile[Config], repo Repository, assets AssetStore, op
 	if err := profile.Current().Config.ValidateConfig(); err != nil {
 		return nil, err
 	}
-	svc := &Service{profile: profile, repo: repo, assets: assets, now: time.Now, newID: NewID, imageSlots: make(chan struct{}, 1), process: processImage}
+	tenantID, err := ParseTenantID(profile.Current().Config.BootstrapTenantID)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap tenant: %w", err)
+	}
+	svc := &Service{
+		profile: profile,
+		repo:    repo,
+		assets:  assets,
+		resolveTenant: func(context.Context) (TenantID, error) {
+			return tenantID, nil
+		},
+		now:        time.Now,
+		newID:      NewID,
+		imageSlots: make(chan struct{}, 1),
+		process:    processImage,
+	}
 	for _, option := range options {
 		if option != nil {
 			option(svc)
@@ -68,6 +84,40 @@ func New(profile service.Profile[Config], repo Repository, assets AssetStore, op
 	return svc, nil
 }
 
+// tenantRepository resolves the authoritative tenant once for one operation
+// and binds the root repository to it. The F2 resolver always returns the
+// configured bootstrap tenant; later principal-aware selection replaces only
+// that resolver decision.
+func (s *Service) tenantRepository(ctx context.Context) (TenantRepository, error) {
+	tenantID, err := s.resolveTenant(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve tenant: %w", err)
+	}
+	tenantRepo, err := s.repo.ForTenant(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("bind repository tenant: %w", err)
+	}
+	return tenantRepo, nil
+}
+
+// tenantStores resolves once, then binds both roots with the same TenantID so
+// an Issue check and its asset operation cannot cross tenant boundaries.
+func (s *Service) tenantStores(ctx context.Context) (TenantRepository, TenantAssetStore, error) {
+	tenantID, err := s.resolveTenant(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve tenant: %w", err)
+	}
+	tenantRepo, err := s.repo.ForTenant(tenantID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("bind repository tenant: %w", err)
+	}
+	tenantAssets, err := s.assets.ForTenant(tenantID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("bind asset tenant: %w", err)
+	}
+	return tenantRepo, tenantAssets, nil
+}
+
 func (s *Service) acquireImageSlot(ctx context.Context) error {
 	select {
 	case s.imageSlots <- struct{}{}:
@@ -80,7 +130,7 @@ func (s *Service) acquireImageSlot(ctx context.Context) error {
 func (s *Service) releaseImageSlot() { <-s.imageSlots }
 
 func (s *Service) UploadAsset(ctx context.Context, issueValue, filename string, input io.Reader) (*Asset, error) {
-	issue, err := s.GetIssue(ctx, issueValue)
+	issue, assets, err := s.assetStoresForIssue(ctx, issueValue)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +155,7 @@ func (s *Service) UploadAsset(ctx context.Context, issueValue, filename string, 
 		}
 		return nil, fmt.Errorf("%w: read image upload: %v", ErrInternal, err)
 	}
-	return s.putProcessedAsset(ctx, issue, processed)
+	return putProcessedAsset(ctx, assets, issue, processed)
 }
 
 func readUploadBytes(input io.Reader) ([]byte, error) {
@@ -124,29 +174,41 @@ func readUploadBytes(input io.Reader) ([]byte, error) {
 	return data, nil
 }
 
-func (s *Service) putProcessedAsset(ctx context.Context, issue *Issue, processed processedImage) (*Asset, error) {
+func putProcessedAsset(ctx context.Context, assets TenantAssetStore, issue *Issue, processed processedImage) (*Asset, error) {
 	key := AssetKey{ProjectKey: issue.ProjectKey, IssueNumber: issue.Number, Name: processed.Name}
-	asset, err := s.assets.Put(ctx, key, AssetWrite{ContentType: processed.ContentType, Width: processed.Width, Height: processed.Height, Data: processed.Data})
+	asset, err := assets.Put(ctx, key, AssetWrite{ContentType: processed.ContentType, Width: processed.Width, Height: processed.Height, Data: processed.Data})
 	if err != nil {
 		return nil, assetStoreError(err)
 	}
 	return asset, nil
 }
 
+func (s *Service) assetStoresForIssue(ctx context.Context, issueValue string) (*Issue, TenantAssetStore, error) {
+	repo, assets, err := s.tenantStores(ctx)
+	if err != nil {
+		return nil, nil, persistenceError(err)
+	}
+	issue, err := getIssue(ctx, repo, issueValue)
+	if err != nil {
+		return nil, nil, err
+	}
+	return issue, assets, nil
+}
+
 func (s *Service) ListAssets(ctx context.Context, issueValue string) ([]*Asset, error) {
-	issue, err := s.GetIssue(ctx, issueValue)
+	issue, assets, err := s.assetStoresForIssue(ctx, issueValue)
 	if err != nil {
 		return nil, err
 	}
-	assets, err := s.assets.List(ctx, IssueRef{ProjectKey: issue.ProjectKey, Number: issue.Number})
+	listed, err := assets.List(ctx, IssueRef{ProjectKey: issue.ProjectKey, Number: issue.Number})
 	if err != nil {
 		return nil, assetStoreError(err)
 	}
-	return assets, nil
+	return listed, nil
 }
 
 func (s *Service) OpenAsset(ctx context.Context, issueValue, filename string) (*AssetContent, error) {
-	issue, err := s.GetIssue(ctx, issueValue)
+	issue, assets, err := s.assetStoresForIssue(ctx, issueValue)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +216,7 @@ func (s *Service) OpenAsset(ctx context.Context, issueValue, filename string) (*
 	if err != nil {
 		return nil, err
 	}
-	content, err := s.assets.Open(ctx, AssetKey{ProjectKey: issue.ProjectKey, IssueNumber: issue.Number, Name: name})
+	content, err := assets.Open(ctx, AssetKey{ProjectKey: issue.ProjectKey, IssueNumber: issue.Number, Name: name})
 	if err != nil {
 		return nil, assetStoreError(err)
 	}
@@ -171,10 +233,14 @@ func assetStoreError(err error) error {
 func (*Service) Name() string { return "tissues" }
 
 func (s *Service) ListProjects(ctx context.Context) ([]*Project, error) {
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
 	var projects []*Project
 	cursor := ""
 	for {
-		page, err := s.ListProjectsPage(ctx, MaxPageSize, cursor)
+		page, err := listProjectsPage(ctx, repo, MaxPageSize, cursor)
 		if err != nil {
 			return nil, err
 		}
@@ -190,7 +256,15 @@ func (s *Service) ListProjectsPage(ctx context.Context, size int, cursor string)
 	if size <= 0 || size > MaxPageSize {
 		return nil, fmt.Errorf("%w: page_size must be between 1 and %d", ErrInvalid, MaxPageSize)
 	}
-	page, err := s.repo.ListProjectsPage(ctx, PageRequest{Size: size, Cursor: cursor})
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	return listProjectsPage(ctx, repo, size, cursor)
+}
+
+func listProjectsPage(ctx context.Context, repo TenantRepository, size int, cursor string) (*ProjectPage, error) {
+	page, err := repo.ListProjectsPage(ctx, PageRequest{Size: size, Cursor: cursor})
 	if err != nil {
 		return nil, persistenceError(err)
 	}
@@ -210,11 +284,17 @@ func (s *Service) ListIssueOverviewsPage(ctx context.Context, size int, cursor, 
 		if err != nil {
 			return nil, err
 		}
-		if _, err := s.repo.GetProject(ctx, projectKey); err != nil {
+	}
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	if projectKey != "" {
+		if _, err := repo.GetProject(ctx, projectKey); err != nil {
 			return nil, persistenceError(err)
 		}
 	}
-	page, err := s.repo.ListIssueOverviewsPage(ctx, PageRequest{Size: size, Cursor: cursor, ProjectKey: projectKey})
+	page, err := repo.ListIssueOverviewsPage(ctx, PageRequest{Size: size, Cursor: cursor, ProjectKey: projectKey})
 	if err != nil {
 		return nil, persistenceError(err)
 	}
@@ -226,7 +306,11 @@ func (s *Service) GetProject(ctx context.Context, key string) (*Project, error) 
 	if err != nil {
 		return nil, err
 	}
-	project, err := s.repo.GetProject(ctx, canonical)
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	project, err := repo.GetProject(ctx, canonical)
 	if err != nil {
 		return nil, persistenceError(err)
 	}
@@ -242,7 +326,11 @@ func (s *Service) CreateProject(ctx context.Context, key string) (*Project, erro
 	if err := created.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
-	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	err = repo.RunInTransaction(ctx, func(tx Transaction) error {
 		if _, getErr := tx.GetProject(ctx, canonical); getErr == nil {
 			return fmt.Errorf("%w: project %q already exists", ErrConflict, canonical)
 		} else if !errors.Is(getErr, ErrNotFound) {
@@ -261,10 +349,14 @@ func (s *Service) ListIssues(ctx context.Context, projectKey string) ([]*Issue, 
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.repo.GetProject(ctx, canonical); err != nil {
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
 		return nil, persistenceError(err)
 	}
-	issues, err := s.repo.ListIssues(ctx, canonical)
+	if _, err := repo.GetProject(ctx, canonical); err != nil {
+		return nil, persistenceError(err)
+	}
+	issues, err := repo.ListIssues(ctx, canonical)
 	if err != nil {
 		return nil, persistenceError(err)
 	}
@@ -273,11 +365,19 @@ func (s *Service) ListIssues(ctx context.Context, projectKey string) ([]*Issue, 
 }
 
 func (s *Service) GetIssue(ctx context.Context, value string) (*Issue, error) {
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	return getIssue(ctx, repo, value)
+}
+
+func getIssue(ctx context.Context, repo TenantRepository, value string) (*Issue, error) {
 	ref, err := issueRefInput(value)
 	if err != nil {
 		return nil, err
 	}
-	issue, err := s.repo.GetIssue(ctx, ref)
+	issue, err := repo.GetIssue(ctx, ref)
 	if err != nil {
 		return nil, persistenceError(err)
 	}
@@ -296,7 +396,11 @@ func (s *Service) CreateIssue(ctx context.Context, projectKey string, req Create
 	}
 	now := Timestamp(s.now())
 	var result *Issue
-	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	err = repo.RunInTransaction(ctx, func(tx Transaction) error {
 		project, err := tx.GetProject(ctx, projectKey)
 		if err != nil {
 			return err
@@ -342,7 +446,11 @@ func (s *Service) UpdateIssue(ctx context.Context, req UpdateIssueRequest) (*Iss
 	}
 	now := Timestamp(s.now())
 	var result *Issue
-	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	err = repo.RunInTransaction(ctx, func(tx Transaction) error {
 		issue, err := tx.GetIssue(ctx, ref)
 		if err != nil {
 			return err
@@ -379,7 +487,11 @@ func (s *Service) MoveIssue(ctx context.Context, issueValue, parentValue string)
 	}
 	now := Timestamp(s.now())
 	var result *Issue
-	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	err = repo.RunInTransaction(ctx, func(tx Transaction) error {
 		issue, err := tx.GetIssue(ctx, ref)
 		if err != nil {
 			return err
@@ -469,7 +581,11 @@ func (s *Service) setState(ctx context.Context, value string, state State) (*Iss
 	}
 	now := Timestamp(s.now())
 	var result *Issue
-	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	err = repo.RunInTransaction(ctx, func(tx Transaction) error {
 		issue, err := tx.GetIssue(ctx, ref)
 		if err != nil {
 			return err
@@ -500,7 +616,11 @@ func (s *Service) AddComment(ctx context.Context, issueValue, author, body strin
 	}
 	wallTime := Timestamp(s.now())
 	var result *Comment
-	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	err = repo.RunInTransaction(ctx, func(tx Transaction) error {
 		issue, err := tx.GetIssue(ctx, ref)
 		if err != nil {
 			return err
@@ -547,7 +667,11 @@ func (s *Service) EditComment(ctx context.Context, issueValue, commentID, body s
 	}
 	now := Timestamp(s.now())
 	var result *Comment
-	err = s.repo.RunInTransaction(ctx, func(tx Transaction) error {
+	repo, err := s.tenantRepository(ctx)
+	if err != nil {
+		return nil, persistenceError(err)
+	}
+	err = repo.RunInTransaction(ctx, func(tx Transaction) error {
 		_, err := tx.GetIssue(ctx, ref)
 		if err != nil {
 			return err

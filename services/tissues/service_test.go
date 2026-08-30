@@ -6,7 +6,111 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	coreconfig "github.com/tedla-brandsema/tissues/lib/core/config"
 )
+
+type failingRepositoryRoot struct{ err error }
+
+func (r failingRepositoryRoot) ForTenant(TenantID) (TenantRepository, error) { return nil, r.err }
+
+type failingAssetRoot struct{ err error }
+
+func (r failingAssetRoot) ForTenant(TenantID) (TenantAssetStore, error) { return nil, r.err }
+
+type fixedRepositoryRoot struct{ repo TenantRepository }
+
+func (r fixedRepositoryRoot) ForTenant(id TenantID) (TenantRepository, error) {
+	if err := id.Validate(); err != nil {
+		return nil, err
+	}
+	return r.repo, nil
+}
+
+type fixedAssetRoot struct{ assets TenantAssetStore }
+
+func (r fixedAssetRoot) ForTenant(id TenantID) (TenantAssetStore, error) {
+	if err := id.Validate(); err != nil {
+		return nil, err
+	}
+	return r.assets, nil
+}
+
+type accessCountingRepositoryRoot struct {
+	root       Repository
+	operations int
+}
+
+func (r *accessCountingRepositoryRoot) ForTenant(id TenantID) (TenantRepository, error) {
+	bound, err := r.root.ForTenant(id)
+	if err != nil {
+		return nil, err
+	}
+	return accessCountingTenantRepository{TenantRepository: bound, root: r}, nil
+}
+
+type accessCountingTenantRepository struct {
+	TenantRepository
+	root *accessCountingRepositoryRoot
+}
+
+func (r accessCountingTenantRepository) GetIssue(ctx context.Context, ref IssueRef) (*Issue, error) {
+	r.root.operations++
+	return r.TenantRepository.GetIssue(ctx, ref)
+}
+
+func TestServiceBootstrapValidationAndOperationBindingFailClosed(t *testing.T) {
+	profileFor := func(tenant string) *coreconfig.Slot[Config] {
+		profile, err := coreconfig.NewServiceProfile("test", Config{BootstrapTenantID: tenant})
+		if err != nil {
+			t.Fatal(err)
+		}
+		slot, err := coreconfig.NewSlot(profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slot
+	}
+	invalid := profileFor("default")
+	if _, err := New(invalid, newMemoryRepository(), newMemoryAssetStore()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid bootstrap tenant = %v", err)
+	}
+	want := errors.New("bind failed")
+	valid := profileFor(testTenantID.String())
+	repoFailure, err := New(valid, failingRepositoryRoot{err: want}, newMemoryAssetStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repoFailure.CreateProject(context.Background(), "FAIL"); !errors.Is(err, ErrInternal) {
+		t.Fatalf("repository bind = %v", err)
+	}
+	countingRepository := &accessCountingRepositoryRoot{root: newMemoryRepository()}
+	assetFailure, err := New(valid, countingRepository, failingAssetRoot{err: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := assetFailure.ListAssets(context.Background(), "FAIL-1"); !errors.Is(err, ErrInternal) {
+		t.Fatalf("asset bind = %v", err)
+	}
+	if countingRepository.operations != 0 {
+		t.Fatalf("asset binding failure performed %d repository operations", countingRepository.operations)
+	}
+}
+
+func TestTenantResolutionFailurePerformsNoStoreAccess(t *testing.T) {
+	repository := newMemoryRepository()
+	assets := newMemoryAssetStore()
+	svc := testServiceWithAssets(t, repository, assets)
+	svc.resolveTenant = func(context.Context) (TenantID, error) {
+		return "", errors.New("tenant authority unavailable")
+	}
+	if _, err := svc.CreateProject(context.Background(), "ALPHA"); !errors.Is(err, ErrInternal) {
+		t.Fatalf("CreateProject error = %v", err)
+	}
+	if len(repository.tenants) != 0 || len(assets.tenants) != 0 {
+		t.Fatalf("resolver failure accessed stores: repository=%d assets=%d", len(repository.tenants), len(assets.tenants))
+	}
+}
 
 func TestProjectLifecycleAndIndependentIssueAllocation(t *testing.T) {
 	ctx := context.Background()
@@ -88,7 +192,7 @@ func TestHierarchyByReferenceAndImmutableIdentity(t *testing.T) {
 	if err != nil || !same.Updated.Equal(b.Updated) || same.ParentRef != a.Ref {
 		t.Fatalf("same-parent no-op = %#v, %v", same, err)
 	}
-	project, _ := repo.GetProject(ctx, "FLUENT")
+	project, _ := mustMemoryTenantRepository(t, repo).GetProject(ctx, "FLUENT")
 	if project.NextIssueNumber != 4 {
 		t.Fatalf("allocator = %d", project.NextIssueNumber)
 	}
@@ -167,8 +271,9 @@ func TestCreateIssueRejectsCanonicalRefCollision(t *testing.T) {
 	svc := testService(t, repo)
 	_, _ = svc.CreateProject(ctx, "FLUENT")
 	_, _ = svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "First", Description: "body"})
+	bound := mustMemoryTenantRepository(t, repo)
 	repo.mu.Lock()
-	repo.projects["FLUENT"].NextIssueNumber = 1
+	bound.data().projects["FLUENT"].NextIssueNumber = 1
 	repo.mu.Unlock()
 	if _, err := svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "Collision", Description: "body"}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("canonical ref collision = %v", err)
@@ -193,8 +298,9 @@ func TestStoredHierarchyCorruptionUsesCanonicalRefs(t *testing.T) {
 			_, _ = svc.CreateProject(ctx, "FLUENT")
 			_, _ = svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "One", Description: "body"})
 			_, _ = svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "Two", Description: "body"})
+			bound := mustMemoryTenantRepository(t, repo)
 			repo.mu.Lock()
-			test.mutate(repo.issues["FLUENT"])
+			test.mutate(bound.data().issues["FLUENT"])
 			repo.mu.Unlock()
 			if _, err := svc.ListIssues(ctx, "FLUENT"); !errors.Is(err, ErrInternal) {
 				t.Fatalf("corruption = %v", err)
@@ -222,8 +328,9 @@ func TestMoveIssueRejectsStoredAncestorCorruption(t *testing.T) {
 			for _, title := range []string{"One", "Two", "Three"} {
 				_, _ = svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: title, Description: "body"})
 			}
+			bound := mustMemoryTenantRepository(t, repo)
 			repo.mu.Lock()
-			test.mutate(repo.issues["FLUENT"])
+			test.mutate(bound.data().issues["FLUENT"])
 			repo.mu.Unlock()
 			if _, err := svc.MoveIssue(ctx, "FLUENT-1", "FLUENT-2"); !errors.Is(err, ErrInternal) {
 				t.Fatalf("stored corruption = %v", err)
@@ -294,31 +401,31 @@ func TestPagedProjectsAndGlobalIssueOverview(t *testing.T) {
 }
 
 type retryRepository struct {
-	*memoryRepository
+	*memoryTenantRepository
 	attempts    int
 	seenRefs    []string
 	seenNumbers []int64
 }
 
 func (r *retryRepository) RunInTransaction(ctx context.Context, fn func(Transaction) error) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	first := r.copy()
-	if err := fn(recordingTx{memoryTx{repo: first}, r}); err != nil {
+	r.root.mu.Lock()
+	defer r.root.mu.Unlock()
+	first := copyMemoryTenantData(r.data())
+	if err := fn(recordingTx{memoryTx{data: first}, r}); err != nil {
 		return err
 	}
 	r.attempts++
 	// Simulate a concurrent winning allocation before the retry.
 	winning := cloneProject(first.projects["FLUENT"])
-	r.projects["FLUENT"] = winning
-	r.issues["FLUENT"] = first.issues["FLUENT"]
-	r.comments["FLUENT"] = first.comments["FLUENT"]
-	second := r.copy()
-	if err := fn(recordingTx{memoryTx{repo: second}, r}); err != nil {
+	r.data().projects["FLUENT"] = winning
+	r.data().issues["FLUENT"] = first.issues["FLUENT"]
+	r.data().comments["FLUENT"] = first.comments["FLUENT"]
+	second := copyMemoryTenantData(r.data())
+	if err := fn(recordingTx{memoryTx{data: second}, r}); err != nil {
 		return err
 	}
 	r.attempts++
-	r.projects, r.issues, r.comments = second.projects, second.issues, second.comments
+	r.root.tenants[r.tenantID] = second
 	return nil
 }
 
@@ -341,8 +448,8 @@ func TestTransactionRetryReallocatesRefAndPreservesTimestamp(t *testing.T) {
 	if project.NextIssueNumber != 1 {
 		t.Fatal(project.NextIssueNumber)
 	}
-	retry := &retryRepository{memoryRepository: base}
-	svc.repo = retry
+	retry := &retryRepository{memoryTenantRepository: mustMemoryTenantRepository(t, base)}
+	svc.repo = fixedRepositoryRoot{repo: retry}
 	created, err := svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "Retry", Description: "body"})
 	if err != nil {
 		t.Fatal(err)
@@ -382,14 +489,14 @@ func TestIssueCreationDoesNotUseIDGeneratorButCommentsDo(t *testing.T) {
 }
 
 type sequenceRepository struct {
-	*memoryRepository
+	*memoryTenantRepository
 	operations []string
 	before     *Issue
 	unchanged  bool
 }
 
 func (r *sequenceRepository) RunInTransaction(ctx context.Context, fn func(Transaction) error) error {
-	return r.memoryRepository.RunInTransaction(ctx, func(tx Transaction) error {
+	return r.memoryTenantRepository.RunInTransaction(ctx, func(tx Transaction) error {
 		return fn(&sequenceTx{Transaction: tx, owner: r})
 	})
 }
@@ -431,8 +538,8 @@ func TestAddCommentReadWriteOrderAndSerializationFence(t *testing.T) {
 	svc := testService(t, base)
 	_, _ = svc.CreateProject(ctx, "FLUENT")
 	issue, _ := svc.CreateIssue(ctx, "FLUENT", CreateIssueRequest{Title: "Issue", Description: "body"})
-	repo := &sequenceRepository{memoryRepository: base}
-	svc.repo = repo
+	repo := &sequenceRepository{memoryTenantRepository: mustMemoryTenantRepository(t, base)}
+	svc.repo = fixedRepositoryRoot{repo: repo}
 	if _, err := svc.AddComment(ctx, issue.Ref, "Ada", "body"); err != nil {
 		t.Fatal(err)
 	}
@@ -443,32 +550,32 @@ func TestAddCommentReadWriteOrderAndSerializationFence(t *testing.T) {
 }
 
 type commentRetryRepository struct {
-	*memoryRepository
+	*memoryTenantRepository
 	attempts int
 	ids      []string
 	created  []time.Time
 }
 
 func (r *commentRetryRepository) RunInTransaction(ctx context.Context, fn func(Transaction) error) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	first := r.copy()
-	if err := fn(commentRecordingTx{memoryTx: memoryTx{repo: first}, owner: r}); err != nil {
+	r.root.mu.Lock()
+	defer r.root.mu.Unlock()
+	first := copyMemoryTenantData(r.data())
+	if err := fn(commentRecordingTx{memoryTx: memoryTx{data: first}, owner: r}); err != nil {
 		return err
 	}
 	r.attempts++
 	ref := "FLUENT-1"
 	winner := &Comment{ID: "zzzzzzzzzzzzzzzzzzzzzzzzzz", Author: "winner", Created: r.created[0], Updated: r.created[0], Body: "winner"}
-	if r.comments["FLUENT"][ref] == nil {
-		r.comments["FLUENT"][ref] = map[string]*Comment{}
+	if r.data().comments["FLUENT"][ref] == nil {
+		r.data().comments["FLUENT"][ref] = map[string]*Comment{}
 	}
-	r.comments["FLUENT"][ref][winner.ID] = winner
-	second := r.copy()
-	if err := fn(commentRecordingTx{memoryTx: memoryTx{repo: second}, owner: r}); err != nil {
+	r.data().comments["FLUENT"][ref][winner.ID] = winner
+	second := copyMemoryTenantData(r.data())
+	if err := fn(commentRecordingTx{memoryTx: memoryTx{data: second}, owner: r}); err != nil {
 		return err
 	}
 	r.attempts++
-	r.projects, r.issues, r.comments = second.projects, second.issues, second.comments
+	r.root.tenants[r.tenantID] = second
 	return nil
 }
 
@@ -493,8 +600,8 @@ func TestAddCommentRetryKeepsIDAndRecomputesChronology(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo := &commentRetryRepository{memoryRepository: base}
-	svc.repo = repo
+	repo := &commentRetryRepository{memoryTenantRepository: mustMemoryTenantRepository(t, base)}
+	svc.repo = fixedRepositoryRoot{repo: repo}
 	comment, err := svc.AddComment(ctx, issue.Ref, "Ada", "retried")
 	if err != nil {
 		t.Fatal(err)

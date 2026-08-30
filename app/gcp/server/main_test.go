@@ -72,6 +72,7 @@ func TestProductionAssetAndTimeoutEnvironmentLoads(t *testing.T) {
 		Environment: coreconfig.MapEnvironment{
 			"TISSUES_SERVER_READ_TIMEOUT":           "60s",
 			"TISSUES_SERVER_WRITE_TIMEOUT":          "60s",
+			"TISSUES_TISSUES_BOOTSTRAP_TENANT_ID":   "7womw3jzkek74oggxj6f42xak4",
 			"TISSUES_TISSUES_STORAGE_PROJECT_ID":    "tissues-dev",
 			"TISSUES_TISSUES_STORAGE_NAMESPACE":     "tissues",
 			"TISSUES_TISSUES_ASSETS_BUCKET":         "tissues-dev-tissues-assets-production",
@@ -88,6 +89,9 @@ func TestProductionAssetAndTimeoutEnvironmentLoads(t *testing.T) {
 	}
 	if got := profile.Config.Tissues.Assets.Bucket; got != "tissues-dev-tissues-assets-production" {
 		t.Fatalf("asset bucket = %q", got)
+	}
+	if got := profile.Config.Tissues.BootstrapTenantID; got != "7womw3jzkek74oggxj6f42xak4" {
+		t.Fatalf("bootstrap tenant = %q", got)
 	}
 	if profile.Config.Auth.IssuerURL != "https://tissues.example.test" || profile.Config.Auth.MCPResourceURL != "https://tissues.example.test/mcp" {
 		t.Fatalf("auth canonical URLs = %q / %q", profile.Config.Auth.IssuerURL, profile.Config.Auth.MCPResourceURL)

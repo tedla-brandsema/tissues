@@ -61,6 +61,7 @@ auth:
 
 tissues:
   enabled: true
+  bootstrap_tenant_id: 7womw3jzkek74oggxj6f42xak4
   assets:
     bucket: tissues-dev-tissues-assets-dogfood
   storage:
@@ -94,6 +95,7 @@ echo "  Project:   ${PROJECT_ID}"
 echo "  URL:       ${ORIGIN}/?view=open"
 echo "  Datastore: tissues-dogfood-projects"
 echo "  Assets:    gs://tissues-dev-tissues-assets-dogfood"
+echo "  Tenant:    7womw3jzkek74oggxj6f42xak4"
 echo "  Profile:   ${PROFILE_FILE}"
 echo
 echo "Open this in your browser:"

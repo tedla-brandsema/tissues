@@ -34,7 +34,8 @@ func TestAssetAPIUploadListRetrieveAndConditionalGET(t *testing.T) {
 		t.Fatalf("asset upload changed Issue.Updated: before=%s after=%v err=%v", issue.Updated, after, err)
 	}
 
-	if _, err := store.Put(context.Background(), AssetKey{ProjectKey: "ASSETS", IssueNumber: 1, Name: "a.jpg"}, AssetWrite{ContentType: "image/jpeg", Width: 1, Height: 1, Data: []byte("jpeg")}); err != nil {
+	tenantAssets := mustMemoryTenantAssets(t, store)
+	if _, err := tenantAssets.Put(context.Background(), AssetKey{ProjectKey: "ASSETS", IssueNumber: 1, Name: "a.jpg"}, AssetWrite{ContentType: "image/jpeg", Width: 1, Height: 1, Data: []byte("jpeg")}); err != nil {
 		t.Fatal(err)
 	}
 	list := httptest.NewRecorder()
@@ -45,7 +46,7 @@ func TestAssetAPIUploadListRetrieveAndConditionalGET(t *testing.T) {
 
 	get := httptest.NewRecorder()
 	svc.apiHandler().ServeHTTP(get, httptest.NewRequest(http.MethodGet, uploaded.URL, nil))
-	stored := store.assets[AssetKey{ProjectKey: "ASSETS", IssueNumber: 1, Name: "diagram.png"}]
+	stored := store.tenants[testTenantID].assets[AssetKey{ProjectKey: "ASSETS", IssueNumber: 1, Name: "diagram.png"}]
 	if get.Code != http.StatusOK || !bytes.Equal(get.Body.Bytes(), stored.data) {
 		t.Fatalf("get=%d bytes=%d", get.Code, get.Body.Len())
 	}
@@ -127,7 +128,7 @@ func TestAssetAPIRawMultipartFilenameValidation(t *testing.T) {
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("browser filename upload=%d %s", recorder.Code, recorder.Body.String())
 	}
-	if _, ok := store.assets[AssetKey{ProjectKey: "ASSETS", IssueNumber: 1, Name: "screenshot.png"}]; !ok {
+	if _, ok := store.tenants[testTenantID].assets[AssetKey{ProjectKey: "ASSETS", IssueNumber: 1, Name: "screenshot.png"}]; !ok {
 		t.Fatal("canonical screenshot.png asset was not stored")
 	}
 }
@@ -139,7 +140,7 @@ func TestAssetAPIMissingAndStorageDetailsArePrivate(t *testing.T) {
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("missing=%d %s", missing.Code, missing.Body.String())
 	}
-	svc.assets = failingAssetStore{err: fmt.Errorf("bucket secret-bucket object issues/ASSETS/1/x.png")}
+	svc.assets = fixedAssetRoot{assets: failingAssetStore{err: fmt.Errorf("bucket secret-bucket object issues/ASSETS/1/x.png")}}
 	failed := httptest.NewRecorder()
 	svc.apiHandler().ServeHTTP(failed, httptest.NewRequest(http.MethodGet, apiBasePath+"/issues/ASSETS-1/assets/x.png", nil))
 	if failed.Code != http.StatusInternalServerError || strings.Contains(failed.Body.String(), "secret-bucket") || strings.Contains(failed.Body.String(), "issues/ASSETS") {

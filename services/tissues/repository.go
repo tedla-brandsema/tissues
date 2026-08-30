@@ -31,8 +31,15 @@ type IssueOverviewPage struct {
 	NextCursor string
 }
 
-// Repository is the persistence boundary required by tissues today.
+// Repository is the root persistence boundary. Domain operations become
+// available only after binding an immutable TenantID.
 type Repository interface {
+	ForTenant(TenantID) (TenantRepository, error)
+}
+
+// TenantRepository is the persistence boundary for one immutable tenant.
+// It has no operation that can escape to or select another tenant.
+type TenantRepository interface {
 	ListProjectsPage(context.Context, PageRequest) (*ProjectPage, error)
 	ListIssueOverviewsPage(context.Context, PageRequest) (*IssueOverviewPage, error)
 	GetProject(context.Context, string) (*Project, error)

@@ -54,6 +54,12 @@ type AssetContent struct {
 }
 
 type AssetStore interface {
+	ForTenant(TenantID) (TenantAssetStore, error)
+}
+
+// TenantAssetStore exposes asset operations only after immutable tenant
+// binding. AssetKey remains tenant-relative by design.
+type TenantAssetStore interface {
 	Put(context.Context, AssetKey, AssetWrite) (*Asset, error)
 	Open(context.Context, AssetKey) (*AssetContent, error)
 	List(context.Context, IssueRef) ([]*Asset, error)

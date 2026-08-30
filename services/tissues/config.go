@@ -11,10 +11,11 @@ import (
 // Config is the complete typed contribution for one tissues Service.
 type Config struct {
 	service.Contribution
-	Enabled bool `cfg:"bool,default=true,restart=true"`
-	Storage StorageConfig
-	Assets  AssetsConfig
-	Auth    AuthConfig
+	Enabled           bool   `cfg:"bool,default=true,restart=true"`
+	BootstrapTenantID string `cfg:"string,restart=true"`
+	Storage           StorageConfig
+	Assets            AssetsConfig
+	Auth              AuthConfig
 }
 
 var _ service.Configuration = Config{}
@@ -52,6 +53,9 @@ func (cfg Config) ValidateConfig() error {
 	}
 	if strings.TrimSpace(cfg.Assets.Bucket) == "" {
 		return fmt.Errorf("Assets.Bucket is required when Enabled is true")
+	}
+	if _, err := ParseTenantID(cfg.BootstrapTenantID); err != nil {
+		return fmt.Errorf("BootstrapTenantID must be a valid Tissues ID")
 	}
 	if !cfg.Auth.Enabled {
 		return nil
