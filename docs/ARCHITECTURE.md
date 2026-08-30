@@ -38,6 +38,7 @@ app/gcp/server
     +-- services/tissues
             +-- tissues domain
             +-- tissues Datastore adapter
+            +-- inactive Firestore Native adapter
             +-- private GCS Issue asset adapter
             +-- same-origin /api/tissues/v1 JSON boundary
             +-- frontend/ React workspace and embedded generated assets
@@ -86,7 +87,7 @@ later principal-aware selection will replace only that decision. Tenant
 identity is never inferred from email, subject, OAuth client, host, or
 Datastore namespace.
 
-## Tissues domain and Datastore
+## Tissues domain and persistence adapters
 
 Project is the only layer above the single Issue type. A canonical immutable
 Project key scopes a transactional `NextIssueNumber` allocator. Each Issue's
@@ -136,6 +137,44 @@ second limit. Other Datastore concurrency modes use their documented
 overlapping-data transaction contention behavior instead. This transitional
 adapter is not the next persistence epoch; F3 replaces it with Firestore
 Native before activation.
+
+The implemented but inactive `services/tissues/firestore` adapter accepts an
+already-created official Firestore client and exposes only the same root
+`ForTenant(TenantID)` boundary. Application composition still constructs and
+uses Datastore; named-database runtime configuration and Firestore activation
+belong to the later cutover phase. The Native adapter uses tenant-local flat
+collections and does not require a tenant document:
+
+```text
+tenants/{tenantID}/projects/{PROJECT}
+tenants/{tenantID}/issues/{PROJECT-NUMBER}
+tenants/{tenantID}/comments/{IssueRef}~{CommentID}
+```
+
+Project, Issue, and Comment documents carry redundant canonical identity for
+corruption detection. All domain chronology remains signed Unix-nanosecond
+integers rather than Firestore timestamp values. Project pages order by
+document ID. Issue overviews order by `updated_ns DESC, project_key ASC,
+number ASC`; their versioned base64url cursors bind tenant, query kind, and
+optional Project filter to the exact resume tuple.
+
+Native transactions use only transaction-scoped reads and queries before
+queuing writes. New Project, Issue, and Comment documents use create-if-absent
+semantics after an absent read. Each existing Issue write increments its
+persistence-only `comment_order_revision`; the unchanged logical Issue write
+at the end of AddComment is therefore a real per-Issue serialization fence.
+This preserves strict Comment chronology with Standard edition's default
+pessimistic server transactions and remains correct under optimistic
+concurrency because two commits cannot succeed from the same observed Issue
+revision. No tenant-global fence is introduced.
+
+The adapter's required Standard collection-scope indexes and recommended
+single-field exemptions live in
+`services/tissues/firestore/firestore.indexes.json`. They cover unfiltered and
+Project-filtered Issue overview orderings and the transaction-scoped latest
+Comment query; `description` and `body` are exempted because they are not
+queried. The file is declarative evidence only in this phase and is not wired
+to deployment.
 
 IssueRefs intentionally remain tenant-local human identities: two tenants may
 both contain `FLUENT-17`, with the bound repository determining which entity is

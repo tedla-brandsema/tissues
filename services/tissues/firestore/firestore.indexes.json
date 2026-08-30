@@ -1,0 +1,43 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "issues",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "updated_ns", "order": "DESCENDING" },
+        { "fieldPath": "project_key", "order": "ASCENDING" },
+        { "fieldPath": "number", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "issues",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "project_key", "order": "ASCENDING" },
+        { "fieldPath": "updated_ns", "order": "DESCENDING" },
+        { "fieldPath": "number", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "comments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "issue_ref", "order": "ASCENDING" },
+        { "fieldPath": "created_ns", "order": "DESCENDING" },
+        { "fieldPath": "comment_id", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "issues",
+      "fieldPath": "description",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "comments",
+      "fieldPath": "body",
+      "indexes": []
+    }
+  ]
+}
