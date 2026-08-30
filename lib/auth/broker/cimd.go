@@ -90,12 +90,13 @@ func ValidateClientMetadataURL(raw string) error {
 }
 
 type clientMetadata struct {
-	ClientID                string   `json:"client_id"`
-	ClientName              string   `json:"client_name"`
-	RedirectURIs            []string `json:"redirect_uris"`
-	ResponseTypes           []string `json:"response_types"`
-	GrantTypes              []string `json:"grant_types"`
-	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+	ClientID                          string    `json:"client_id"`
+	ClientName                        string    `json:"client_name"`
+	RedirectURIs                      []string  `json:"redirect_uris"`
+	ResponseTypes                     []string  `json:"response_types"`
+	GrantTypes                        []string  `json:"grant_types"`
+	TokenEndpointAuthMethod           string    `json:"token_endpoint_auth_method"`
+	TokenEndpointAuthMethodsSupported *[]string `json:"token_endpoint_auth_methods_supported"`
 }
 
 func parseClientMetadata(body []byte, requestedClientID string) (Client, error) {
@@ -127,7 +128,11 @@ func parseClientMetadata(body []byte, requestedClientID string) (Client, error) 
 		}
 		seenRedirects[redirectURI] = struct{}{}
 	}
-	if metadata.TokenEndpointAuthMethod != string(TokenEndpointAuthMethodNone) {
+	if metadata.TokenEndpointAuthMethodsSupported != nil {
+		if !containsExact(*metadata.TokenEndpointAuthMethodsSupported, string(TokenEndpointAuthMethodNone)) {
+			return Client{}, errors.New("unsupported token endpoint authentication method")
+		}
+	} else if metadata.TokenEndpointAuthMethod != string(TokenEndpointAuthMethodNone) {
 		return Client{}, errors.New("unsupported token endpoint authentication method")
 	}
 	if len(metadata.ResponseTypes) > 0 && !containsExact(metadata.ResponseTypes, "code") {

@@ -265,7 +265,7 @@ func TestMCPMutationToolsRequireWriteScopeBeforeDomainInvocation(t *testing.T) {
 				t.Fatalf("write-scope denial = %#v body=%q", result, response.Body.String())
 			}
 			challenge := result["_meta"].(map[string]any)["mcp/www_authenticate"].([]any)[0].(string)
-			if !strings.Contains(challenge, `resource_metadata="`+testMCPMetadata+`"`) || !strings.Contains(challenge, `scope="tissues:write"`) || !strings.Contains(challenge, `error="insufficient_scope"`) {
+			if !strings.Contains(challenge, `resource_metadata="`+testMCPMetadata+`"`) || !strings.Contains(challenge, `scope="tissues:write"`) || !strings.Contains(challenge, `error="insufficient_scope"`) || !strings.Contains(challenge, `error_description="Authorization requires the tissues:write scope."`) {
 				t.Fatalf("write-scope challenge = %q", challenge)
 			}
 			if repo.transactions != 0 {
@@ -624,7 +624,7 @@ func TestMCPPerToolScopeStepUpAndActorBridge(t *testing.T) {
 	}
 	meta := result["_meta"].(map[string]any)
 	challenges := meta["mcp/www_authenticate"].([]any)
-	if len(challenges) != 1 || !strings.Contains(challenges[0].(string), `resource_metadata="`+testMCPMetadata+`"`) || !strings.Contains(challenges[0].(string), `scope="tissues:read"`) || !strings.Contains(challenges[0].(string), `error="insufficient_scope"`) {
+	if len(challenges) != 1 || !strings.Contains(challenges[0].(string), `resource_metadata="`+testMCPMetadata+`"`) || !strings.Contains(challenges[0].(string), `scope="tissues:read"`) || !strings.Contains(challenges[0].(string), `error="insufficient_scope"`) || !strings.Contains(challenges[0].(string), `error_description="Authorization requires the tissues:read scope."`) {
 		t.Fatalf("scope challenge = %#v", challenges)
 	}
 	if actor.called {

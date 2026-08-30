@@ -429,7 +429,7 @@ func (s *Service) resolveClient(ctx context.Context, clientID string) (Client, e
 }
 
 func allowsLoopbackPort(client Client) bool {
-	return client.TokenEndpointAuthMethod == TokenEndpointAuthMethodNone && !client.ExactRedirectURIs
+	return client.TokenEndpointAuthMethod == TokenEndpointAuthMethodNone
 }
 
 func (s *Service) isEntitled(subject, email, clientID string) bool {

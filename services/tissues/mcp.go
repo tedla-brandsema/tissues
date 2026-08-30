@@ -620,10 +620,11 @@ func mcpPageSize(size int) int {
 func authorizeMCPTool(ctx context.Context, req *mcp.CallToolRequest, spec mcpToolSpec, metadataURL string) (context.Context, *mcp.CallToolResult) {
 	info := req.Extra.TokenInfo
 	if info == nil || !slices.Contains(info.Scopes, spec.Scope) {
-		challenge := fmt.Sprintf(`Bearer resource_metadata=%q, scope=%q, error="insufficient_scope"`, metadataURL, spec.Scope)
+		description := fmt.Sprintf("Authorization requires the %s scope.", spec.Scope)
+		challenge := fmt.Sprintf(`Bearer resource_metadata=%q, scope=%q, error="insufficient_scope", error_description=%q`, metadataURL, spec.Scope, description)
 		return ctx, &mcp.CallToolResult{
 			Meta:    mcp.Meta{"mcp/www_authenticate": []string{challenge}},
-			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Authorization requires the %s scope.", spec.Scope)}},
+			Content: []mcp.Content{&mcp.TextContent{Text: description}},
 			IsError: true,
 		}
 	}

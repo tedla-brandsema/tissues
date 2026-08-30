@@ -8,12 +8,15 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
 
 const testMetadataClientID = "https://client.example.test/oauth/client.json"
+
+const chatGPTMetadataClientID = "https://chatgpt.com/oauth/client.json"
 
 type stubMetadataFetcher struct {
 	body  []byte
@@ -28,6 +31,10 @@ func (f *stubMetadataFetcher) Fetch(_ context.Context, clientID string) ([]byte,
 
 func validClientMetadata() string {
 	return `{"client_id":"` + testMetadataClientID + `","client_name":"Test Client","redirect_uris":["https://client.example.test/callback"],"response_types":["code"],"grant_types":["authorization_code"],"token_endpoint_auth_method":"none"}`
+}
+
+func currentChatGPTClientMetadata() string {
+	return `{"client_id":"` + chatGPTMetadataClientID + `","client_name":"ChatGPT","redirect_uris":["https://chatgpt.com/connector_platform_oauth_redirect"],"response_types":["code"],"grant_types":["authorization_code","refresh_token"],"token_endpoint_auth_method":"private_key_jwt","token_endpoint_auth_methods_supported":["none","private_key_jwt"]}`
 }
 
 func TestClientMetadataURLValidation(t *testing.T) {
@@ -118,6 +125,71 @@ func TestClientMetadataValidation(t *testing.T) {
 			}
 			if err == nil {
 				t.Fatalf("invalid metadata accepted: %#v", client)
+			}
+		})
+	}
+}
+
+func TestCurrentChatGPTClientMetadataResolvesAsPublic(t *testing.T) {
+	fetcher := &stubMetadataFetcher{body: []byte(currentChatGPTClientMetadata())}
+	resolver, err := NewCIMDResolver([]string{chatGPTMetadataClientID}, fetcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := resolver.ResolveClient(context.Background(), chatGPTMetadataClientID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.ID != chatGPTMetadataClientID || client.TokenEndpointAuthMethod != TokenEndpointAuthMethodNone || client.Secret != "" || !client.ExactRedirectURIs {
+		t.Fatalf("client = %#v", client)
+	}
+	if !reflect.DeepEqual(client.RedirectURIs, []string{"https://chatgpt.com/connector_platform_oauth_redirect"}) {
+		t.Fatalf("redirect URIs = %v", client.RedirectURIs)
+	}
+}
+
+func TestClientMetadataTokenEndpointAuthMethodSelection(t *testing.T) {
+	base := validClientMetadata()
+	tests := map[string]struct {
+		body string
+		want bool
+	}{
+		"plural none": {
+			body: strings.TrimSuffix(base, "}") + `,"token_endpoint_auth_methods_supported":["none"]}`,
+			want: true,
+		},
+		"plural preference order irrelevant": {
+			body: strings.Replace(strings.TrimSuffix(base, "}")+`,"token_endpoint_auth_methods_supported":["private_key_jwt","none"]}`, `"token_endpoint_auth_method":"none"`, `"token_endpoint_auth_method":"private_key_jwt"`, 1),
+			want: true,
+		},
+		"plural unsupported": {
+			body: strings.TrimSuffix(base, "}") + `,"token_endpoint_auth_methods_supported":["private_key_jwt"]}`,
+		},
+		"plural empty": {
+			body: strings.TrimSuffix(base, "}") + `,"token_endpoint_auth_methods_supported":[]}`,
+		},
+		"singular none": {
+			body: base,
+			want: true,
+		},
+		"singular unsupported": {
+			body: strings.Replace(base, `"token_endpoint_auth_method":"none"`, `"token_endpoint_auth_method":"private_key_jwt"`, 1),
+		},
+		"singular missing": {
+			body: strings.Replace(base, `,"token_endpoint_auth_method":"none"`, "", 1),
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			client, err := parseClientMetadata([]byte(tc.body), testMetadataClientID)
+			if tc.want {
+				if err != nil || client.TokenEndpointAuthMethod != TokenEndpointAuthMethodNone || client.Secret != "" {
+					t.Fatalf("client=%#v err=%v", client, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("unsupported metadata accepted: %#v", client)
 			}
 		})
 	}

@@ -141,26 +141,59 @@ func TestCIMDAuthorizationNeverRedirectsBeforeMetadataAndRedirectValidation(t *t
 	})
 }
 
-func TestCIMDRedirectMatchingIsExactWithoutLoopbackPortRelaxation(t *testing.T) {
-	registered := "http://127.0.0.1:41000/callback"
+func TestCIMDRedirectMatchingAllowsOnlyLoopbackIPPortVariation(t *testing.T) {
+	tests := map[string]struct {
+		registered string
+		candidate  string
+		want       bool
+	}{
+		"IPv4 registered without port":    {"http://127.0.0.1/callback", "http://127.0.0.1:42000/callback", true},
+		"IPv4 registered with other port": {"http://127.0.0.1:41000/callback", "http://127.0.0.1:42000/callback", true},
+		"IPv6 registered without port":    {"http://[::1]/callback", "http://[::1]:42000/callback", true},
+		"loopback host differs":           {"http://127.0.0.1/callback", "http://[::1]:42000/callback", false},
+		"path differs":                    {"http://127.0.0.1/callback", "http://127.0.0.1:42000/other", false},
+		"query differs":                   {"http://127.0.0.1/callback?mode=one", "http://127.0.0.1:42000/callback?mode=two", false},
+		"scheme differs":                  {"http://127.0.0.1/callback", "https://127.0.0.1:42000/callback", false},
+		"localhost port differs":          {"http://localhost:41000/callback", "http://localhost:42000/callback", false},
+		"HTTPS port differs":              {"https://client.example.test:41000/callback", "https://client.example.test:42000/callback", false},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			fetcher := &stubMetadataFetcher{body: metadataFor(testMetadataClientID, tc.registered)}
+			svc := newCIMDTestService(t, fetcher, nil)
+			values := cimdAuthorizationValues()
+			values.Set("redirect_uri", tc.candidate)
+			rec := authorizeCIMD(t, svc, values)
+			if tc.want {
+				if rec.Code != http.StatusFound {
+					t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+				}
+				location, err := url.Parse(rec.Header().Get("Location"))
+				if err != nil || location.Query().Get("code") == "" || location.Query().Get("error") != "" {
+					t.Fatalf("location=%q err=%v", rec.Header().Get("Location"), err)
+				}
+				return
+			}
+			if rec.Code != http.StatusBadRequest || rec.Header().Get("Location") != "" {
+				t.Fatalf("status=%d location=%q", rec.Code, rec.Header().Get("Location"))
+			}
+		})
+	}
+}
+
+func TestCIMDLoopbackAuthorizationCodeBindsActualRuntimeRedirect(t *testing.T) {
+	registered := "http://127.0.0.1/callback"
+	runtimeRedirect := "http://127.0.0.1:42000/callback"
 	fetcher := &stubMetadataFetcher{body: metadataFor(testMetadataClientID, registered)}
 	svc := newCIMDTestService(t, fetcher, nil)
-	exactValues := cimdAuthorizationValues()
-	exactValues.Set("redirect_uri", registered)
-	exact := authorizeCIMD(t, svc, exactValues)
-	if exact.Code != http.StatusFound {
-		t.Fatalf("exact redirect status=%d body=%q", exact.Code, exact.Body.String())
-	}
-	exactLocation, err := url.Parse(exact.Header().Get("Location"))
-	if err != nil || exactLocation.Query().Get("code") == "" || exactLocation.Query().Get("error") != "" {
-		t.Fatalf("exact redirect location=%q err=%v", exact.Header().Get("Location"), err)
-	}
-
 	values := cimdAuthorizationValues()
-	values.Set("redirect_uri", "http://127.0.0.1:42000/callback")
-	rec := authorizeCIMD(t, svc, values)
-	if rec.Code != http.StatusBadRequest || rec.Header().Get("Location") != "" {
-		t.Fatalf("status=%d location=%q", rec.Code, rec.Header().Get("Location"))
+	values.Set("redirect_uri", runtimeRedirect)
+	code := authorizationCode(t, authorizeCIMD(t, svc, values))
+
+	requireTokenError(t, exchangeCIMD(svc, testMetadataClientID, code, "http://127.0.0.1:43000/callback", testResource, testVerifier), http.StatusBadRequest, "invalid_grant")
+	success := exchangeCIMD(svc, testMetadataClientID, code, runtimeRedirect, testResource, testVerifier)
+	if success.Code != http.StatusOK {
+		t.Fatalf("runtime redirect exchange status=%d body=%q", success.Code, success.Body.String())
 	}
 }
 
