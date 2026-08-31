@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -219,6 +221,71 @@ func TestProductionAndDogfoodDeploymentTargetsAreSeparated(t *testing.T) {
 			t.Errorf("%s fixture does not contain %q", name, fixture.want)
 		}
 	}
+}
+
+func TestProductionDeployRequiresExplicitClientMetadataAdmission(t *testing.T) {
+	const (
+		variable = "TISSUES_AUTH_CLIENT_METADATA_URL_LIST"
+		admitted = "https://chatgpt.com/oauth/codex/client.json;https://chatgpt.com/oauth/client.json"
+		marker   = "fake gcloud invoked"
+	)
+	environmentWithout := func(keys ...string) []string {
+		var environment []string
+		for _, entry := range os.Environ() {
+			keep := true
+			for _, key := range keys {
+				if strings.HasPrefix(entry, key+"=") {
+					keep = false
+					break
+				}
+			}
+			if keep {
+				environment = append(environment, entry)
+			}
+		}
+		return environment
+	}
+	run := func(t *testing.T, value string, set bool) (string, int) {
+		t.Helper()
+		bin := t.TempDir()
+		fakeGcloud := filepath.Join(bin, "gcloud")
+		if err := os.WriteFile(fakeGcloud, []byte("#!/usr/bin/env bash\necho '"+marker+"' >&2\nexit 73\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", "../../../deploy.sh")
+		cmd.Env = append(environmentWithout(variable, "PATH"), "PATH="+bin+":"+os.Getenv("PATH"))
+		if set {
+			cmd.Env = append(cmd.Env, variable+"="+value)
+		}
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatal("deployment unexpectedly succeeded")
+		}
+		exit, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("deployment error = %v", err)
+		}
+		return string(output), exit.ExitCode()
+	}
+
+	t.Run("missing fails before provider access", func(t *testing.T) {
+		output, code := run(t, "", false)
+		if code != 2 || !strings.Contains(output, variable+" must be set") || strings.Contains(output, marker) {
+			t.Fatalf("exit=%d output=%q", code, output)
+		}
+	})
+	t.Run("comma-delimited fails before provider access", func(t *testing.T) {
+		output, code := run(t, "https://one.example/client.json,https://two.example/client.json", true)
+		if code != 2 || !strings.Contains(output, "must not contain commas") || strings.Contains(output, marker) {
+			t.Fatalf("exit=%d output=%q", code, output)
+		}
+	})
+	t.Run("semicolon-delimited passes preflight", func(t *testing.T) {
+		output, code := run(t, admitted, true)
+		if code != 73 || !strings.Contains(output, marker) {
+			t.Fatalf("exit=%d output=%q", code, output)
+		}
+	})
 }
 
 type routeService struct {

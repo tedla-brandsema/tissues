@@ -42,6 +42,11 @@ elif (( $# != 0 )); then
   exit 2
 fi
 
+if [[ "${PACKAGE_ONLY}" != true && -z "${CLIENT_METADATA_URL_LIST//[[:space:]]/}" ]]; then
+  echo "TISSUES_AUTH_CLIENT_METADATA_URL_LIST must be set to a non-empty semicolon-delimited list for production deployment." >&2
+  exit 2
+fi
+
 cleanup() {
   local status=$?
   trap - EXIT
