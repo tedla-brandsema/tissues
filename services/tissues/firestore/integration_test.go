@@ -15,6 +15,8 @@ import (
 	gcfirestore "cloud.google.com/go/firestore"
 	"github.com/tedla-brandsema/tissues/services/tissues"
 	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -62,12 +64,41 @@ func TestNativeIntegrationTenantBehaviorAndCommentConcurrency(t *testing.T) {
 		t.Fatal(err)
 	}
 	projectKey := "IT" + strings.ToUpper(suffix[:10])
+	t.Logf("tenant_id=%s project_key=%s", tenantID, projectKey)
 	created := time.Date(2098, 1, 1, 0, 0, 0, 100, time.UTC)
 	createIntegrationProject(t, ctx, bound, &tissues.Project{Key: projectKey, Created: created, NextIssueNumber: 3})
 	issueA := &tissues.Issue{ProjectKey: projectKey, Number: 1, Ref: projectKey + "-1", Title: "Concurrent A", State: tissues.StateOpen, Created: created, Updated: created, Description: "unchanged"}
-	issueB := &tissues.Issue{ProjectKey: projectKey, Number: 2, Ref: projectKey + "-2", Title: "Concurrent B", State: tissues.StateOpen, Created: created, Updated: created, Description: "unchanged"}
+	issueB := &tissues.Issue{ProjectKey: projectKey, Number: 2, Ref: projectKey + "-2", Title: "Concurrent B", State: tissues.StateOpen, Created: created, Updated: created, Description: "unchanged", ParentRef: issueA.Ref}
 	createIntegrationIssue(t, ctx, bound, issueA)
 	createIntegrationIssue(t, ctx, bound, issueB)
+
+	unfiltered, err := bound.ListIssueOverviewsPage(ctx, tissues.PageRequest{Size: 10})
+	if err != nil {
+		t.Fatalf("unfiltered Issue overview: %v", err)
+	}
+	requireIntegrationOverviews(t, unfiltered, issueA, issueB)
+	t.Logf("unfiltered_overview_count=%d parent_ref=%s", len(unfiltered.Issues), issueB.ParentRef)
+
+	filtered, err := bound.ListIssueOverviewsPage(ctx, tissues.PageRequest{Size: 10, ProjectKey: projectKey})
+	if err != nil {
+		t.Fatalf("filtered Issue overview: %v", err)
+	}
+	requireIntegrationOverviews(t, filtered, issueA, issueB)
+	t.Logf("filtered_overview_count=%d parent_ref=%s", len(filtered.Issues), issueB.ParentRef)
+
+	corrupt := &tissues.Issue{ProjectKey: projectKey, Number: 3, Ref: projectKey + "-3", Title: "Missing parent", State: tissues.StateOpen, Created: created, Updated: created.Add(time.Second), ParentRef: projectKey + "-999"}
+	createIntegrationIssue(t, ctx, bound, corrupt)
+	if _, err := bound.ListIssueOverviewsPage(ctx, tissues.PageRequest{Size: 10}); !errors.Is(err, tissues.ErrInternal) {
+		t.Fatalf("missing-parent Issue overview error = %v, want ErrInternal", err)
+	}
+	corruptRef := bound.issueRef(issueRef(corrupt))
+	if _, err := corruptRef.Delete(ctx); err != nil {
+		t.Fatalf("delete deliberately corrupt Issue: %v", err)
+	}
+	if _, err := corruptRef.Get(ctx); status.Code(err) != codes.NotFound {
+		t.Fatalf("deliberately corrupt Issue still exists: %v", err)
+	}
+	t.Log("missing_parent_err_internal=true corrupt_document_deleted=true")
 
 	seedID := "aaaaaaaaaaaaaaaaaaaaaaaaaa"
 	seed := &tissues.Comment{ID: seedID, Author: "seed", Created: created, Updated: created, Body: "seed"}
@@ -160,7 +191,24 @@ func TestNativeIntegrationTenantBehaviorAndCommentConcurrency(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("committed=%d callback_retry_observed=%t emulator=%t", committed, observedRetry, os.Getenv("FIRESTORE_EMULATOR_HOST") != "")
+	t.Logf("committed=%d strict_chronology_count=%d comment_order_revision=%d callback_retry_observed=%t emulator=%t", committed, len(comments), revisionA, observedRetry, os.Getenv("FIRESTORE_EMULATOR_HOST") != "")
+}
+
+func requireIntegrationOverviews(t *testing.T, page *tissues.IssueOverviewPage, expected ...*tissues.Issue) {
+	t.Helper()
+	if len(page.Issues) != len(expected) {
+		t.Fatalf("Issue overview count = %d, want %d", len(page.Issues), len(expected))
+	}
+	byRef := make(map[string]*tissues.IssueOverview, len(page.Issues))
+	for _, issue := range page.Issues {
+		byRef[issue.Ref] = issue
+	}
+	for _, want := range expected {
+		got := byRef[want.Ref]
+		if got == nil || got.ProjectKey != want.ProjectKey || got.Number != want.Number || got.Title != want.Title || got.State != want.State || got.ParentRef != want.ParentRef || !got.Updated.Equal(want.Updated) {
+			t.Fatalf("Issue overview %s = %#v, want parent %q and matching domain fields", want.Ref, got, want.ParentRef)
+		}
+	}
 }
 
 func createIntegrationProject(t *testing.T, ctx context.Context, store *TenantStore, project *tissues.Project) {
@@ -263,6 +311,7 @@ func integrationComments(t *testing.T, ctx context.Context, store *TenantStore, 
 
 func cleanupIntegrationTenant(t *testing.T, ctx context.Context, store *TenantStore) {
 	t.Helper()
+	deleted := 0
 	for _, collection := range []*gcfirestore.CollectionRef{store.comments(), store.issues(), store.projects()} {
 		iter := collection.Documents(ctx)
 		for {
@@ -277,10 +326,13 @@ func cleanupIntegrationTenant(t *testing.T, ctx context.Context, store *TenantSt
 			}
 			if _, err := doc.Ref.Delete(ctx); err != nil {
 				t.Errorf("cleanup %s: %v", doc.Ref.Path, err)
+			} else {
+				deleted++
 			}
 		}
 		iter.Stop()
 	}
+	t.Logf("cleanup_tenant=%s deleted_documents=%d", store.tenantID, deleted)
 }
 
 func issueRef(issue *tissues.Issue) tissues.IssueRef {

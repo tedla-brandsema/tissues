@@ -29,7 +29,7 @@ func TestFirestoreCodeStoreIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	t.Cleanup(func() { _ = client.Close() })
 	store, err := NewFirestoreCodeStore(client)
 	if err != nil {
 		t.Fatal(err)
@@ -40,11 +40,19 @@ func TestFirestoreCodeStoreIntegration(t *testing.T) {
 		return rawCode
 	}
 	t.Cleanup(func() {
+		cleaned := 0
 		for rawCode := range tracked {
-			if _, err := store.codeRef(rawCode).Delete(ctx); err != nil && status.Code(err) != codes.NotFound {
+			ref := store.codeRef(rawCode)
+			if _, err := ref.Delete(ctx); err != nil && status.Code(err) != codes.NotFound {
 				t.Errorf("clean exact authorization-code document: %v", err)
 			}
+			if _, err := ref.Get(ctx); status.Code(err) != codes.NotFound {
+				t.Errorf("authorization-code cleanup verification: %v", err)
+			} else {
+				cleaned++
+			}
 		}
+		t.Logf("cleanup_authorization_codes=%d", cleaned)
 	})
 	newCode := func() string {
 		rawCode, err := randomToken(32)
@@ -60,6 +68,28 @@ func TestFirestoreCodeStoreIntegration(t *testing.T) {
 		if err := store.SaveCode(ctx, rawCode, value); err != nil {
 			t.Fatal(err)
 		}
+		doc, err := store.codeRef(rawCode).Get(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data := doc.Data()
+		expiresUnix, ok := data["expires_unix"].(int64)
+		if !ok || expiresUnix != value.ExpiresAt.Unix() {
+			t.Fatalf("persisted expires_unix = %v (%T), want %d", data["expires_unix"], data["expires_unix"], value.ExpiresAt.Unix())
+		}
+		expiresAt, ok := data["expires_at"].(time.Time)
+		if !ok || !expiresAt.Equal(value.ExpiresAt) || !expiresAt.Equal(time.Unix(expiresUnix, 0).UTC()) {
+			t.Fatalf("persisted expires_at = %v (%T), want %s", data["expires_at"], data["expires_at"], value.ExpiresAt)
+		}
+		if doc.Ref.ID != firestoreCodeDocumentID(rawCode) || doc.Ref.ID == rawCode {
+			t.Fatal("authorization-code document ID is not the expected SHA-256 digest")
+		}
+		for field, stored := range data {
+			if field == rawCode || firestoreValueContainsString(stored, rawCode) {
+				t.Fatal("raw authorization code found in persisted document data")
+			}
+		}
+		t.Logf("provider_expires_unix=%d provider_expires_at=%s expiry_agreement=true raw_code_absent=true", expiresUnix, expiresAt.UTC().Format(time.RFC3339Nano))
 		if _, err := store.ConsumeCode(ctx, rawCode, value.ClientID, value.RedirectURI, value.Resource, testVerifier); err != nil {
 			t.Fatal(err)
 		}
@@ -133,4 +163,30 @@ func TestFirestoreCodeStoreIntegration(t *testing.T) {
 
 	// Semantic expiry is unit-qualified rather than raced against a possibly
 	// installed asynchronous TTL policy in a live database.
+}
+
+func firestoreValueContainsString(value any, want string) bool {
+	switch value := value.(type) {
+	case string:
+		return value == want
+	case []string:
+		for _, item := range value {
+			if item == want {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range value {
+			if firestoreValueContainsString(item, want) {
+				return true
+			}
+		}
+	case map[string]any:
+		for key, item := range value {
+			if key == want || firestoreValueContainsString(item, want) {
+				return true
+			}
+		}
+	}
+	return false
 }
