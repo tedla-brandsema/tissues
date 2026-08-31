@@ -9,7 +9,6 @@ require (
 )
 
 require (
-	cloud.google.com/go/datastore v1.22.0 // indirect
 	cloud.google.com/go/firestore v1.25.0 // indirect
 	cloud.google.com/go/longrunning v1.2.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

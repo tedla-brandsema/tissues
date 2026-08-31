@@ -43,7 +43,7 @@ func validConfig() Config {
 	return Config{
 		Enabled: true, IssuerURL: "http://127.0.0.1:18080", MCPResourceURL: "http://127.0.0.1:18080/mcp",
 		SigningSecret: "01234567890123456789012345678901", ClientID: "tissues", ClientSecret: "secret",
-		ClientRedirectURI: "http://127.0.0.1:18080/tissues/auth/callback", ProjectID: "project", IdentityAPIKey: "api-key",
+		ClientRedirectURI: "http://127.0.0.1:18080/tissues/auth/callback", IdentityAPIKey: "api-key",
 	}
 }
 

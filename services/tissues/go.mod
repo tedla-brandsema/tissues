@@ -3,7 +3,6 @@ module github.com/tedla-brandsema/tissues/services/tissues
 go 1.25.3
 
 require (
-	cloud.google.com/go/datastore v1.22.0
 	cloud.google.com/go/firestore v1.25.0
 	cloud.google.com/go/storage v1.56.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0

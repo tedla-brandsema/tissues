@@ -3,7 +3,6 @@ module github.com/tedla-brandsema/tissues/lib/auth
 go 1.25.3
 
 require (
-	cloud.google.com/go/datastore v1.22.0
 	cloud.google.com/go/firestore v1.25.0
 	github.com/tedla-brandsema/tissues/lib/core v0.0.0
 	github.com/tedla-brandsema/tissues/lib/gcp v0.0.0

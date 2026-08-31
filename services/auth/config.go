@@ -19,9 +19,6 @@ type Config struct {
 	ClientSecret          string `cfg:"string,secret=true,restart=true"`
 	ClientRedirectURI     string `cfg:"string,restart=true"`
 	ClientMetadataURLList string `cfg:"string,restart=true"`
-	ProjectID             string `cfg:"string,restart=true"`
-	DatastoreNS           string `cfg:"string,default=tissues-auth,restart=true"`
-	DatastoreKind         string `cfg:"string,default=tissues_auth_code,restart=true"`
 	IdentityAPIKey        string `cfg:"string,secret=true,restart=true"`
 	IdentityTenantID      string `cfg:"string,restart=true"`
 	Entitlements          string `cfg:"string"`
@@ -46,7 +43,7 @@ func (cfg Config) ValidateConfig() error {
 	if err := validateMCPResourceURL(cfg.MCPResourceURL); err != nil {
 		return err
 	}
-	for path, value := range map[string]string{"ClientSecret": cfg.ClientSecret, "ProjectID": cfg.ProjectID, "IdentityAPIKey": cfg.IdentityAPIKey} {
+	for path, value := range map[string]string{"ClientSecret": cfg.ClientSecret, "IdentityAPIKey": cfg.IdentityAPIKey} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s must not be empty", path)
 		}

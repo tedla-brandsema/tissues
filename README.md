@@ -33,18 +33,23 @@ npm run e2e
 The Playwright suite qualifies user-critical browser contracts in both Firefox
 and Chromium against deterministic local frontend fixtures.
 
-To run both Services locally against the shared `tissues-dev` Identity Platform
-and Datastore development resources, supply the development Identity Platform
-API key at launch time:
+The local launcher is prepared to run both Services against the shared
+`tissues-dev` Identity Platform and the named `tissues-native-dogfood`
+Firestore Native database. Supply the development Identity Platform API key at
+launch time:
 
 ```sh
 ./run-tissues-local.sh '<identity-platform-api-key>'
 ```
 
 The key is passed only to the process environment; do not store a real key in
-the repository. The launcher uses the persistent Project-era tissues namespace
-`tissues-dogfood-projects`; the pre-Project `tissues-dogfood` namespace is
-left untouched.
+the repository. Do not run the launcher until the dogfood database has been
+created and approved for provider testing in F6. Local dogfood uses stable
+TenantID `64ovir4zjz42qfw6paawmyffga` and private bucket
+`tissues-dev-tissues-assets-dogfood`. Production instead uses the separately
+deployed `tissues-native` database, TenantID
+`7womw3jzkek74oggxj6f42xak4`, and bucket
+`tissues-dev-tissues-assets-production`.
 
 ## Deploy to Cloud Run
 
@@ -74,9 +79,11 @@ Later deployments reuse the existing Secret Manager value and do not require the
 locally. The deployment uses `tissues-dev`, `europe-west4`, the `containers` Artifact
 Registry repository, and the `tissues` Cloud Run service.
 
-During pre-deployment Project/Issue product iteration, current
-`tissues-dogfood-projects` data may be intentionally reset instead of migrated;
-the namespace itself remains the persistent shared dogfood target.
+Source composition is Firestore Native only. The currently serving production
+revision was built from older Datastore source and remains deployed until F6;
+that deployment history is not a supported compatibility or fallback path. F6
+performs a one-way clean production replacement after database setup and
+provider qualification. No data migration is required.
 
 Typed Go `Config` structs are the configuration schema. A named `Profile[T]`
 is resolved, validated, immutable, and revisioned. Values resolve as:
@@ -85,8 +92,11 @@ is resolved, validated, immutable, and revisioned. Values resolve as:
 defaults < named profile < environment < explicit CLI flags
 ```
 
-The outer profile contains Server, auth, and tissues contributions. Every
-Service type contributes typed config even when inactive; `auth.enabled` and
+The outer profile contains Server, deployment-level Firestore, auth, and tissues
+contributions. `firestore.project_id` and `firestore.database_id` select the one
+named deployment database shared by the Auth and Tissues persistence adapters.
+Every Service type
+contributes typed config even when inactive; `auth.enabled` and
 `tissues.enabled` control concrete activation. Each active Service receives
 only its own `Profile[Config]`/`Slot[Config]`. Cloud Run's bare `PORT` override
 belongs solely to `server.Config.Port`.
@@ -97,15 +107,17 @@ reusable shadcn-derived primitives and Tailwind v4 theme styles from
 `lib/frontend`; there is no global cross-Service SPA. Its same-origin browser
 API is namespaced beneath `/api/tissues/v1`.
 
-The tissues Service uses Cloud Datastore through ADC. Its typed storage config
-requires an explicit project ID and defaults its namespace to `tissues`.
-Each operation currently resolves to the configured bootstrap TenantID
-`7womw3jzkek74oggxj6f42xak4`; this stable, non-secret Tissues identity is
-configured identically for local dogfood and deployment. One Service retains
-the root stores and binds them after that per-operation decision, so a future
+Source composition uses one explicitly named Firestore Native client for both
+the global OAuth authorization-code store and tenant-local Tissues repository.
+Production uses `tissues-dev / tissues-native`; local dogfood uses the separate
+`tissues-dev / tissues-native-dogfood` database. Their stable bootstrap
+TenantIDs are respectively `7womw3jzkek74oggxj6f42xak4` and
+`64ovir4zjz42qfw6paawmyffga`. Database separation is required because OAuth
+authorization codes are global issuer state rather than tenant-scoped data, and
+production and dogfood are different issuers. One Service retains the root
+stores and binds them after the per-operation tenant decision, so a future
 request-derived resolver can serve multiple tenants without changing protocol
-or persistence contracts. The Datastore
-namespace selects an environment/storage partition and is not a tenant.
+or persistence contracts.
 Authentication enforcement remains independently optional and preserves exact
 safe local return URLs. Secrets are tagged and redacted from configuration
 diagnostics.

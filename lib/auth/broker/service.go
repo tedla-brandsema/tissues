@@ -73,11 +73,6 @@ type accessToken struct {
 	IssuedAt  int64  `json:"iat"`
 }
 
-type CodeStore interface {
-	SaveCode(ctx context.Context, code string, val authCode) error
-	ConsumeCode(ctx context.Context, code, clientID, redirectURI, resource, codeVerifier string) (authCode, error)
-}
-
 func NewService(cfg ServiceConfig) *Service {
 	if cfg.CodeTTL <= 0 {
 		cfg.CodeTTL = 5 * time.Minute

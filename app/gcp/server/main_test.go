@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +18,10 @@ import (
 )
 
 func TestComposeCanRunWithServicesInactive(t *testing.T) {
-	cfg := appConfig{Server: server.Config{Host: "127.0.0.1", Port: 0, ReadTimeout: time.Second, ReadHeaderTimeout: time.Second, WriteTimeout: time.Second, IdleTimeout: time.Second, MaxHeaderBytes: 1024}}
+	cfg := appConfig{Server: validServerConfig()}
+	if err := cfg.ValidateConfig(); err != nil {
+		t.Fatal(err)
+	}
 	profile := coreconfig.Profile[appConfig]{Name: "test", Config: cfg}
 	srv, closers, err := compose(context.Background(), profile)
 	if err != nil {
@@ -26,6 +31,81 @@ func TestComposeCanRunWithServicesInactive(t *testing.T) {
 	if len(closers) != 0 {
 		t.Fatalf("closers=%d,want 0", len(closers))
 	}
+}
+
+func TestFirestoreConfigRequiredOnlyForActiveServices(t *testing.T) {
+	tests := map[string]struct {
+		cfg  appConfig
+		want string
+	}{
+		"both inactive": {cfg: appConfig{Server: validServerConfig()}},
+		"auth needs project": {
+			cfg:  appConfig{Server: validServerConfig(), Auth: validAuthConfig(), Firestore: firestoreConfig{DatabaseID: "tissues-native"}},
+			want: "ProjectID",
+		},
+		"auth needs database": {
+			cfg:  appConfig{Server: validServerConfig(), Auth: validAuthConfig(), Firestore: firestoreConfig{ProjectID: "tissues-dev"}},
+			want: "DatabaseID",
+		},
+		"tissues needs project": {
+			cfg:  appConfig{Server: validServerConfig(), Tissues: validTissuesConfig(), Firestore: firestoreConfig{DatabaseID: "tissues-native"}},
+			want: "ProjectID",
+		},
+		"tissues needs database": {
+			cfg:  appConfig{Server: validServerConfig(), Tissues: validTissuesConfig(), Firestore: firestoreConfig{ProjectID: "tissues-dev"}},
+			want: "DatabaseID",
+		},
+		"default database rejected": {
+			cfg:  appConfig{Server: validServerConfig(), Auth: validAuthConfig(), Firestore: firestoreConfig{ProjectID: "tissues-dev", DatabaseID: "(default)"}},
+			want: "non-default",
+		},
+		"blank project rejected": {
+			cfg:  appConfig{Server: validServerConfig(), Auth: validAuthConfig(), Firestore: firestoreConfig{ProjectID: " \t", DatabaseID: "tissues-native"}},
+			want: "ProjectID",
+		},
+		"blank database rejected": {
+			cfg:  appConfig{Server: validServerConfig(), Tissues: validTissuesConfig(), Firestore: firestoreConfig{ProjectID: "tissues-dev", DatabaseID: " \t"}},
+			want: "DatabaseID",
+		},
+		"project whitespace rejected": {
+			cfg:  appConfig{Server: validServerConfig(), Auth: validAuthConfig(), Firestore: firestoreConfig{ProjectID: " tissues-dev", DatabaseID: "tissues-native"}},
+			want: "whitespace",
+		},
+		"database whitespace rejected": {
+			cfg:  appConfig{Server: validServerConfig(), Tissues: validTissuesConfig(), Firestore: firestoreConfig{ProjectID: "tissues-dev", DatabaseID: "tissues-native "}},
+			want: "whitespace",
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := test.cfg.ValidateConfig()
+			if test.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func validServerConfig() server.Config {
+	return server.Config{Host: "127.0.0.1", Port: 0, ReadTimeout: time.Second, ReadHeaderTimeout: time.Second, WriteTimeout: time.Second, IdleTimeout: time.Second, MaxHeaderBytes: 1024}
+}
+
+func validAuthConfig() authservice.Config {
+	return authservice.Config{
+		Enabled: true, IssuerURL: "https://tissues.example.test", MCPResourceURL: "https://tissues.example.test/mcp",
+		SigningSecret: "01234567890123456789012345678901", ClientID: "tissues", ClientSecret: "secret",
+		ClientRedirectURI: "https://tissues.example.test/tissues/auth/callback", IdentityAPIKey: "api-key",
+	}
+}
+
+func validTissuesConfig() tissues.Config {
+	return tissues.Config{Enabled: true, BootstrapTenantID: "7womw3jzkek74oggxj6f42xak4", Assets: tissues.AssetsConfig{Bucket: "assets"}}
 }
 
 func TestConcreteServicesShareSDK(t *testing.T) {
@@ -72,12 +152,17 @@ func TestProductionAssetAndTimeoutEnvironmentLoads(t *testing.T) {
 		Environment: coreconfig.MapEnvironment{
 			"TISSUES_SERVER_READ_TIMEOUT":           "60s",
 			"TISSUES_SERVER_WRITE_TIMEOUT":          "60s",
+			"TISSUES_FIRESTORE_PROJECT_ID":          "tissues-dev",
+			"TISSUES_FIRESTORE_DATABASE_ID":         "tissues-native",
+			"TISSUES_AUTH_ENABLED":                  "true",
 			"TISSUES_TISSUES_BOOTSTRAP_TENANT_ID":   "7womw3jzkek74oggxj6f42xak4",
-			"TISSUES_TISSUES_STORAGE_PROJECT_ID":    "tissues-dev",
-			"TISSUES_TISSUES_STORAGE_NAMESPACE":     "tissues",
 			"TISSUES_TISSUES_ASSETS_BUCKET":         "tissues-dev-tissues-assets-production",
 			"TISSUES_AUTH_ISSUER_URL":               "https://tissues.example.test",
 			"TISSUES_AUTH_MCP_RESOURCE_URL":         "https://tissues.example.test/mcp",
+			"TISSUES_AUTH_SIGNING_SECRET":           "01234567890123456789012345678901",
+			"TISSUES_AUTH_CLIENT_SECRET":            "client-secret",
+			"TISSUES_AUTH_CLIENT_REDIRECT_URI":      "https://tissues.example.test/tissues/auth/callback",
+			"TISSUES_AUTH_IDENTITY_API_KEY":         "api-key",
 			"TISSUES_AUTH_CLIENT_METADATA_URL_LIST": "https://client.example.test/oauth/client.json",
 		},
 	})
@@ -93,11 +178,46 @@ func TestProductionAssetAndTimeoutEnvironmentLoads(t *testing.T) {
 	if got := profile.Config.Tissues.BootstrapTenantID; got != "7womw3jzkek74oggxj6f42xak4" {
 		t.Fatalf("bootstrap tenant = %q", got)
 	}
+	if profile.Config.Firestore.ProjectID != "tissues-dev" || profile.Config.Firestore.DatabaseID != "tissues-native" {
+		t.Fatalf("Firestore target = %q / %q", profile.Config.Firestore.ProjectID, profile.Config.Firestore.DatabaseID)
+	}
 	if profile.Config.Auth.IssuerURL != "https://tissues.example.test" || profile.Config.Auth.MCPResourceURL != "https://tissues.example.test/mcp" {
 		t.Fatalf("auth canonical URLs = %q / %q", profile.Config.Auth.IssuerURL, profile.Config.Auth.MCPResourceURL)
 	}
 	if profile.Config.Auth.ClientMetadataURLList != "https://client.example.test/oauth/client.json" {
 		t.Fatalf("auth Client Metadata URL list = %q", profile.Config.Auth.ClientMetadataURLList)
+	}
+}
+
+func TestProductionAndDogfoodDeploymentTargetsAreSeparated(t *testing.T) {
+	const (
+		productionTenant = "7womw3jzkek74oggxj6f42xak4"
+		dogfoodTenant    = "64ovir4zjz42qfw6paawmyffga"
+	)
+	if productionTenant == dogfoodTenant {
+		t.Fatal("production and dogfood TenantIDs must differ")
+	}
+
+	deploy, err := os.ReadFile("../../../deploy.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher, err := os.ReadFile("../../../run-tissues-local.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, fixture := range map[string]struct {
+		source []byte
+		want   string
+	}{
+		"production database": {deploy, `FIRESTORE_DATABASE_ID="tissues-native"`},
+		"production tenant":   {deploy, `TISSUES_BOOTSTRAP_TENANT_ID="` + productionTenant + `"`},
+		"dogfood database":    {launcher, `FIRESTORE_DATABASE_ID="tissues-native-dogfood"`},
+		"dogfood tenant":      {launcher, `DOGFOOD_TENANT_ID="` + dogfoodTenant + `"`},
+	} {
+		if !strings.Contains(string(fixture.source), fixture.want) {
+			t.Errorf("%s fixture does not contain %q", name, fixture.want)
+		}
 	}
 }
 

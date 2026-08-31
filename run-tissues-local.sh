@@ -16,6 +16,8 @@ if [[ -z "$REPO_ROOT" || ! -f "$REPO_ROOT/app/gcp/server/main.go" ]]; then
 fi
 
 PROJECT_ID="tissues-dev"
+FIRESTORE_DATABASE_ID="tissues-native-dogfood"
+DOGFOOD_TENANT_ID="64ovir4zjz42qfw6paawmyffga"
 HOST="127.0.0.1"
 PORT="18080"
 ORIGIN="http://${HOST}:${PORT}"
@@ -49,24 +51,23 @@ server:
   read_timeout: 60s
   write_timeout: 60s
 
+firestore:
+  project_id: ${PROJECT_ID}
+  database_id: ${FIRESTORE_DATABASE_ID}
+
 auth:
   enabled: true
   issuer_url: ${ORIGIN}
   mcp_resource_url: ${ORIGIN}/mcp
   client_id: tissues
   client_redirect_uri: ${ORIGIN}/tissues/auth/callback
-  project_id: ${PROJECT_ID}
-  datastore_ns: tissues-auth-dogfood
   insecure_cookie: true
 
 tissues:
   enabled: true
-  bootstrap_tenant_id: 7womw3jzkek74oggxj6f42xak4
+  bootstrap_tenant_id: ${DOGFOOD_TENANT_ID}
   assets:
     bucket: tissues-dev-tissues-assets-dogfood
-  storage:
-    project_id: ${PROJECT_ID}
-    namespace: tissues-dogfood-projects
   auth:
     enabled: true
     broker_url: ${ORIGIN}
@@ -91,12 +92,12 @@ export PORT="$PORT"
 
 echo "Starting tissues local dogfood..."
 echo
-echo "  Project:   ${PROJECT_ID}"
-echo "  URL:       ${ORIGIN}/?view=open"
-echo "  Datastore: tissues-dogfood-projects"
-echo "  Assets:    gs://tissues-dev-tissues-assets-dogfood"
-echo "  Tenant:    7womw3jzkek74oggxj6f42xak4"
-echo "  Profile:   ${PROFILE_FILE}"
+echo "  Project:            ${PROJECT_ID}"
+echo "  URL:                ${ORIGIN}/?view=open"
+echo "  Firestore database: ${FIRESTORE_DATABASE_ID}"
+echo "  Assets:             gs://tissues-dev-tissues-assets-dogfood"
+echo "  Tenant:             ${DOGFOOD_TENANT_ID}"
+echo "  Profile:            ${PROFILE_FILE}"
 echo
 echo "Open this in your browser:"
 echo

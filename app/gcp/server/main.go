@@ -7,8 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
-	gcds "cloud.google.com/go/datastore"
+	gcfirestore "cloud.google.com/go/firestore"
 	"cloud.google.com/go/storage"
 	"github.com/tedla-brandsema/tissues/lib/auth/broker"
 	coreconfig "github.com/tedla-brandsema/tissues/lib/core/config"
@@ -16,16 +17,22 @@ import (
 	"github.com/tedla-brandsema/tissues/lib/service"
 	authservice "github.com/tedla-brandsema/tissues/services/auth"
 	"github.com/tedla-brandsema/tissues/services/tissues"
-	tissuesds "github.com/tedla-brandsema/tissues/services/tissues/datastore"
+	tissuesfirestore "github.com/tedla-brandsema/tissues/services/tissues/firestore"
 	tissuesgcs "github.com/tedla-brandsema/tissues/services/tissues/gcs"
 )
 
 const serverName = "tissues"
 
 type appConfig struct {
-	Server  server.Config
-	Auth    authservice.Config
-	Tissues tissues.Config
+	Server    server.Config
+	Firestore firestoreConfig
+	Auth      authservice.Config
+	Tissues   tissues.Config
+}
+
+type firestoreConfig struct {
+	ProjectID  string `cfg:"string,restart=true"`
+	DatabaseID string `cfg:"string,restart=true"`
 }
 
 func (cfg appConfig) ValidateConfig() error {
@@ -37,6 +44,31 @@ func (cfg appConfig) ValidateConfig() error {
 	}
 	if err := cfg.Tissues.ValidateConfig(); err != nil {
 		return fmt.Errorf("Tissues: %w", err)
+	}
+	if err := cfg.Firestore.validate(cfg.Auth.Enabled || cfg.Tissues.Enabled); err != nil {
+		return fmt.Errorf("Firestore: %w", err)
+	}
+	return nil
+}
+
+func (cfg firestoreConfig) validate(required bool) error {
+	if !required && cfg.ProjectID == "" && cfg.DatabaseID == "" {
+		return nil
+	}
+	for _, field := range []struct {
+		path  string
+		value string
+	}{{"ProjectID", cfg.ProjectID}, {"DatabaseID", cfg.DatabaseID}} {
+		trimmed := strings.TrimSpace(field.value)
+		if trimmed == "" {
+			return fmt.Errorf("%s must not be empty", field.path)
+		}
+		if field.value != trimmed {
+			return fmt.Errorf("%s must not contain leading or trailing whitespace", field.path)
+		}
+	}
+	if cfg.DatabaseID == "(default)" {
+		return fmt.Errorf("DatabaseID must name a non-default Firestore database")
 	}
 	return nil
 }
@@ -103,13 +135,20 @@ func compose(ctx context.Context, profile coreconfig.Profile[appConfig]) (*serve
 			_ = closers[i]()
 		}
 	}
-	if profile.Config.Auth.Enabled {
-		client, clientErr := gcds.NewClient(ctx, profile.Config.Auth.ProjectID)
-		if clientErr != nil {
-			return nil, nil, fmt.Errorf("create auth Datastore client: %w", clientErr)
+	var firestoreClient *gcfirestore.Client
+	if profile.Config.Auth.Enabled || profile.Config.Tissues.Enabled {
+		firestoreClient, err = gcfirestore.NewClientWithDatabase(ctx, profile.Config.Firestore.ProjectID, profile.Config.Firestore.DatabaseID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("create shared Firestore client: %w", err)
 		}
-		closers = append(closers, client.Close)
-		codeStore := broker.NewDatastoreCodeStore(client, profile.Config.Auth.DatastoreNS, profile.Config.Auth.DatastoreKind)
+		closers = append(closers, firestoreClient.Close)
+	}
+	if profile.Config.Auth.Enabled {
+		codeStore, storeErr := broker.NewFirestoreCodeStore(firestoreClient)
+		if storeErr != nil {
+			closeOnError()
+			return nil, nil, fmt.Errorf("create auth Firestore CodeStore: %w", storeErr)
+		}
 		authService, serviceErr = authservice.New(authSlot, codeStore)
 		if serviceErr != nil {
 			closeOnError()
@@ -118,13 +157,7 @@ func compose(ctx context.Context, profile coreconfig.Profile[appConfig]) (*serve
 		active = append(active, authService)
 	}
 	if profile.Config.Tissues.Enabled {
-		client, clientErr := gcds.NewClient(ctx, profile.Config.Tissues.Storage.ProjectID)
-		if clientErr != nil {
-			closeOnError()
-			return nil, nil, fmt.Errorf("create tissues Datastore client: %w", clientErr)
-		}
-		closers = append(closers, client.Close)
-		repository, repoErr := tissuesds.New(client, profile.Config.Tissues.Storage.Namespace)
+		repository, repoErr := tissuesfirestore.New(firestoreClient)
 		if repoErr != nil {
 			closeOnError()
 			return nil, nil, repoErr

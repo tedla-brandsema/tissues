@@ -64,7 +64,7 @@ func TestAuthEnabledPreservesExactOriginalRequestURI(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}
-	cfg := Config{Enabled: true, BootstrapTenantID: testTenantID.String(), Storage: StorageConfig{ProjectID: "example", Namespace: "test"}, Assets: AssetsConfig{Bucket: "assets"}, Auth: AuthConfig{Enabled: true, BrokerURL: brokerURL, ClientID: "tissues", ClientSecret: "client-secret", RedirectURI: "http://tissues.example.test/tissues/auth/callback", SessionSecret: "01234567890123456789012345678901", InsecureCookie: true}}
+	cfg := Config{Enabled: true, BootstrapTenantID: testTenantID.String(), Assets: AssetsConfig{Bucket: "assets"}, Auth: AuthConfig{Enabled: true, BrokerURL: brokerURL, ClientID: "tissues", ClientSecret: "client-secret", RedirectURI: "http://tissues.example.test/tissues/auth/callback", SessionSecret: "01234567890123456789012345678901", InsecureCookie: true}}
 	profile, err := config.NewServiceProfile("test", cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +168,7 @@ func TestAuthenticatedBootstrapPrefersEmail(t *testing.T) {
 func TestServiceProfileReloadDoesNotMutateOuterServerConfig(t *testing.T) {
 	ctx := context.Background()
 	store := config.NewMemoryStore()
-	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"bootstrap_tenant_id":"7womw3jzkek74oggxj6f42xak4","storage":{"project_id":"example","namespace":"one"},"assets":{"bucket":"assets"}}`)})
+	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"bootstrap_tenant_id":"7womw3jzkek74oggxj6f42xak4","assets":{"bucket":"one"}}`)})
 	manager, err := config.NewManager[Config](ctx, config.LoadOptions{Name: "demo", Prefix: "TISSUES_SERVICE", Store: store})
 	if err != nil {
 		t.Fatal(err)
@@ -182,12 +182,12 @@ func TestServiceProfileReloadDoesNotMutateOuterServerConfig(t *testing.T) {
 	if err := svc.RegisterRoutes(mux); err != nil {
 		t.Fatal(err)
 	}
-	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"bootstrap_tenant_id":"7womw3jzkek74oggxj6f42xak4","storage":{"project_id":"example","namespace":"two"},"assets":{"bucket":"assets"}}`)})
+	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true,"bootstrap_tenant_id":"7womw3jzkek74oggxj6f42xak4","assets":{"bucket":"two"}}`)})
 	result, err := manager.Reload(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Profile.Revision != 2 || result.Profile.Config.Storage.Namespace != "two" || outerPort != 8080 {
+	if result.Profile.Revision != 2 || result.Profile.Config.Assets.Bucket != "two" || outerPort != 8080 {
 		t.Fatalf("reload=%#v outerPort=%d", result, outerPort)
 	}
 	store.Put("demo", config.Document{Format: "json", Data: []byte(`{"enabled":true}`)})

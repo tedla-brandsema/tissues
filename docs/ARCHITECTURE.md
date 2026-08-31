@@ -32,13 +32,12 @@ app/gcp/server
     |       reusable source-owned UI primitives, theme, and utilities
     |
     +-- services/auth
-    |       +-- lib/auth/broker
+    |       +-- Firestore Native CodeStore in lib/auth/broker
     |       +-- lib/gcp/auth
     |
     +-- services/tissues
             +-- tissues domain
-            +-- tissues Datastore adapter
-            +-- inactive Firestore Native adapter
+            +-- Firestore Native adapter
             +-- private GCS Issue asset adapter
             +-- same-origin /api/tissues/v1 JSON boundary
             +-- frontend/ React workspace and embedded generated assets
@@ -55,10 +54,14 @@ possess runtime credentials.
 
 ## Typed configuration and profiles
 
-The outer application config is stable and contains `Server server.Config`,
-`Auth auth.Config`, and `Tissues tissues.Config`. Each Service contribution is
-resolved into its own immutable `Profile[Config]` and `Slot[Config]`; Services
-receive only that typed handle, never the outer application profile.
+The outer application config contains `Server server.Config`, a deployment-level
+`Firestore` contribution with `ProjectID` and `DatabaseID`, `Auth auth.Config`,
+and `Tissues tissues.Config`. When either Service is active, the executable
+requires a nonblank, whitespace-exact project and non-default named database.
+When both are inactive it creates no Firestore client and needs no Firestore
+configuration or ADC. Each Service contribution is resolved into its own
+immutable `Profile[Config]` and `Slot[Config]`; Services receive only that typed
+handle, never the outer application profile or physical database coordinates.
 
 Values resolve in the fixed order `defaults < profile < environment < CLI`.
 Candidates are fully resolved and validated before atomic replacement. Invalid
@@ -70,19 +73,21 @@ does not mutate outer Server configuration.
 `services/auth` owns the auth contribution, broker composition, routes,
 behavior, and `services/auth/frontend`. Reusable broker infrastructure remains
 in `lib/auth/broker`, and reusable GCP auth adapters remain in `lib/gcp/auth`.
-The broker has an inactive Firestore Native authorization-code adapter rooted
+The broker has a Firestore Native authorization-code adapter rooted
 at `oauthAuthorizationCodes/{sha256(rawCode)}`. Authorization codes are global
 issuer state, not tenant data, and the raw bearer credential is never stored or
 used as a document ID. `expires_unix` remains the synchronous semantic-expiry
 authority; the matching Firestore timestamp `expires_at` exists only for
 eventual TTL cleanup. The future TTL policy is collection group
-`oauthAuthorizationCodes`, field `expires_at`, for cleanup only. Application
-composition continues to inject the Datastore CodeStore until the later
-named-database activation phase.
+`oauthAuthorizationCodes`, field `expires_at`, for cleanup only. Source
+composition injects this adapter from the shared named Firestore client. The
+currently deployed pre-F6 production revision was built from older Datastore
+source; it is deployment history, not a current backend option. F6 installs and
+verifies the TTL policy before activation.
 `services/tissues` owns the tissues contribution, Project, Issue, and Comment domain,
 repository contract, same-origin JSON and browser routes,
-`services/tissues/frontend`, and its
-schema-specific Cloud Datastore adapter under `services/tissues/datastore`.
+`services/tissues/frontend`, and its sole persistence adapter under
+`services/tissues/firestore`.
 
 Each relying Service controls authentication enforcement independently. When
 tissues enforcement is enabled, signed local state preserves the exact safe
@@ -93,10 +98,10 @@ TenantID. The Service retains root Repository and AssetStore boundaries,
 resolves the TenantID from the operation context exactly once, and binds the
 required roots with that same ID. The current resolver ignores actor context;
 later principal-aware selection will replace only that decision. Tenant
-identity is never inferred from email, subject, OAuth client, host, or
-Datastore namespace.
+identity is never inferred from email, subject, OAuth client, host, database,
+or project.
 
-## Tissues domain and persistence adapters
+## Tissues domain and persistence
 
 Project is the only layer above the single Issue type. A canonical immutable
 Project key scopes a transactional `NextIssueNumber` allocator. Each Issue's
@@ -125,34 +130,12 @@ for each operation, and binds the roots through `ForTenant`. Ordinary domain
 and asset operations exist only on the returned tenant stores. Asset operations
 resolve once and use that exact ID for both Issue lookup and object access.
 
-Within the existing environment namespace, a non-persisted
-`tissues_tenant/{tenantID}` ancestor scopes every domain query and key. The
-namespace is transitional storage configuration, not tenancy. A
-`tissues_project` named key beneath that ancestor owns its allocator. Its
-`tissues_issue` children use the canonical IssueRef as their named identity.
-`tissues_comment` entities descend from their Issue. Issue
-hierarchy is relationship data, never Datastore ancestry. Descriptions and
-bodies are unindexed; trees, parent issue IDs, and comments are derived and
-deterministically sorted in Go. Domain timestamps are stored as Unix-nanosecond
-integers so Datastore's native timestamp precision cannot erase the required
-one-nanosecond comment ordering.
-
-This transitional ancestry puts every Project below the same tenant root key,
-so a tenant's descendants share entity-group ancestry. That enables strongly
-consistent tenant ancestor queries, but under Datastore's
-`OPTIMISTIC_WITH_ENTITY_GROUPS` concurrency mode it also makes tenant-wide
-writes share the legacy entity-group contention boundary and one-write-per-
-second limit. Other Datastore concurrency modes use their documented
-overlapping-data transaction contention behavior instead. This transitional
-adapter is not the next persistence epoch; F3 replaces it with Firestore
-Native before activation.
-
-The implemented but inactive `services/tissues/firestore` adapter accepts an
-already-created official Firestore client and exposes only the same root
-`ForTenant(TenantID)` boundary. Application composition still constructs and
-uses Datastore; named-database runtime configuration and Firestore activation
-belong to the later cutover phase. The Native adapter uses tenant-local flat
-collections and does not require a tenant document:
+The `services/tissues/firestore` adapter accepts the one official
+Firestore client created by `app/gcp/server` with
+`firestore.NewClientWithDatabase`. The same client feeds the Auth CodeStore and
+the Tissues repository and is closed once by the application. The adapter
+exposes only the same root `ForTenant(TenantID)` boundary. It uses tenant-local
+flat collections and does not require a tenant document:
 
 ```text
 tenants/{tenantID}/projects/{PROJECT}
@@ -185,6 +168,39 @@ Comment query; `description` and `body` are exempted because they are not
 queried. The file is declarative evidence only in this phase and is not wired
 to deployment.
 
+Production targets project `tissues-dev`, named Standard Native database
+`tissues-native`, in `europe-west4`, with bootstrap TenantID
+`7womw3jzkek74oggxj6f42xak4`. Local dogfood targets the separate named database
+`tissues-native-dogfood` in the same project, with bootstrap TenantID
+`64ovir4zjz42qfw6paawmyffga`. Their GCS buckets are also physically separate.
+OAuth authorization codes are global issuer state and production and dogfood
+use different issuers, so TenantID cannot provide environment isolation;
+database identity is deployment configuration and is not derived from TenantID.
+
+Current source is Firestore Native only. The currently deployed pre-F6 revision
+was built from older Datastore source:
+
+```text
+pre-F6 deployed revision
+    older Datastore source
+
+corrected F5 source; activated in F6
+    Firestore Native Tissues state + Firestore OAuth codes only
+```
+
+There is no migration, dual read, dual write, shadow persistence, fallback, or
+Datastore compatibility implementation. Outstanding old OAuth authorization
+codes are disposable and clients may reauthorize. F6 prepares and qualifies
+dogfood first, then prepares and qualifies production before the one-way clean
+production replacement: create the dogfood database, install its required
+indexes and TTL policy, qualify real Tissues and OAuth behavior, then create and
+configure production, install its indexes and TTL policy, deploy, and qualify
+production. None of those provider operations occur in F5.
+
+The runtime service account retains Google's predefined
+`roles/datastore.user` role as the Firestore data read/write role. Its
+historical name does not represent a Datastore-mode compatibility path.
+
 IssueRefs intentionally remain tenant-local human identities: two tenants may
 both contain `FLUENT-17`, with the bound repository determining which entity is
 addressed. Provider cursors are wrapped with their TenantID so replay against a
@@ -212,11 +228,12 @@ ProjectsOverview -> ProjectView (create or existing)
 IssuesOverview   -> IssueView   (create or existing)
 ```
 
-Overview tables use opaque Datastore cursors with Previous/Next history in the
+Overview tables use opaque provider cursors with Previous/Next history in the
 browser. Projects are ordered by canonical key. The global Issue overview is a
 lightweight cross-Project read model ordered by `Updated` descending. Its
-optional Project filter is an ancestor query, persists locally in the browser,
-and supplies the initial Project for Issue creation. The read model validates
+optional Project filter uses `project_key` equality filtering with its declared
+ordering/index, persists locally in the browser, and supplies the initial
+Project for Issue creation. The read model validates
 canonical IssueRefs and ParentRefs without loading recursive children/comments. Project-scoped Issue
 trees remain the source for parent-Issue-ID suggestions.
 
